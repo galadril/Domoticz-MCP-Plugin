@@ -670,21 +670,23 @@ class BasePlugin:
             self.server_thread = threading.Thread(target=self._run_server_async, daemon=True)
             self.server_thread.start()
             
-            # Give the server a moment to start
-            time.sleep(2)
+            # Give the server more time to start and try multiple times
+            for attempt in range(5):
+                time.sleep(1)  # Wait 1 second between attempts
+                if self._check_server_health():
+                    self.server_running = True
+                    self.server_start_time = time.time()
+                    self.restart_attempts = 0
+                    Domoticz.Log("MCP Server started successfully")
+                    self._update_status_device(True, "Running")
+                    return True
+                else:
+                    Domoticz.Debug(f"Health check attempt {attempt + 1}/5 failed, retrying...")
             
-            # Check if server started successfully
-            if self._check_server_health():
-                self.server_running = True
-                self.server_start_time = time.time()
-                self.restart_attempts = 0
-                Domoticz.Log("MCP Server started successfully")
-                self._update_status_device(True, "Running")
-                return True
-            else:
-                Domoticz.Error("Failed to start MCP Server - health check failed")
-                self._update_status_device(False, "Failed to start")
-                return False
+            # If we get here, all health checks failed
+            Domoticz.Error("Failed to start MCP Server - health check failed after 5 attempts")
+            self._update_status_device(False, "Failed to start")
+            return False
                 
         except Exception as e:
             Domoticz.Error(f"Error starting MCP Server: {str(e)}")
@@ -779,14 +781,24 @@ class BasePlugin:
         """Check if the MCP server is responding"""
         try:
             health_url = f"http://{self.host}:{self.port}/health"
-            response = requests.get(health_url, timeout=5)
+            Domoticz.Debug(f"Checking server health at: {health_url}")
+            response = requests.get(health_url, timeout=3)
             
             if response.status_code == 200:
                 data = response.json()
-                return data.get("status") == "healthy"
+                is_healthy = data.get("status") == "healthy"
+                Domoticz.Debug(f"Health check response: {data}")
+                return is_healthy
             else:
+                Domoticz.Debug(f"Health check failed with status code: {response.status_code}")
                 return False
                 
+        except requests.exceptions.ConnectionError as e:
+            Domoticz.Debug(f"Health check connection error: {str(e)}")
+            return False
+        except requests.exceptions.Timeout as e:
+            Domoticz.Debug(f"Health check timeout: {str(e)}")
+            return False
         except Exception as e:
             Domoticz.Debug(f"Health check failed: {str(e)}")
             return False
