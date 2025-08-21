@@ -45,30 +45,34 @@ if plugin_path not in sys.path:
 
 # Import our MCP server module with better error handling
 try:
-    # Try different import methods
+    # Try the full-featured version first
     try:
         from domoticz_mcp import DomoticzMCPServer
-        Domoticz.Debug("Successfully imported DomoticzMCPServer from domoticz_mcp")
-    except ImportError:
-        # Try importing from the current directory
-        import domoticz_mcp
-        DomoticzMCPServer = domoticz_mcp.DomoticzMCPServer
-        Domoticz.Debug("Successfully imported DomoticzMCPServer via domoticz_mcp module")
+        Domoticz.Debug("Successfully imported DomoticzMCPServer from domoticz_mcp (full version)")
+        MCP_VERSION = "full"
+    except ImportError as e:
+        Domoticz.Debug(f"Full version import failed: {e}, trying simple version")
+        # Try the simple version as fallback
+        from domoticz_mcp_simple import DomoticzMCPServer
+        Domoticz.Debug("Successfully imported DomoticzMCPServer from domoticz_mcp_simple (simple version)")
+        MCP_VERSION = "simple"
     
     MCP_MODULE_AVAILABLE = True
-    Domoticz.Log("MCP module loaded successfully")
+    Domoticz.Log(f"MCP module loaded successfully ({MCP_VERSION} version)")
     
 except ImportError as e:
-    Domoticz.Error(f"Failed to import domoticz_mcp module: {e}")
+    Domoticz.Error(f"Failed to import any MCP module: {e}")
     Domoticz.Error(f"Plugin path: {plugin_path}")
     Domoticz.Error(f"Python path: {sys.path}")
     MCP_MODULE_AVAILABLE = False
     DomoticzMCPServer = None
+    MCP_VERSION = "none"
 except Exception as e:
-    Domoticz.Error(f"Unexpected error importing domoticz_mcp module: {e}")
+    Domoticz.Error(f"Unexpected error importing MCP module: {e}")
     Domoticz.Error(traceback.format_exc())
     MCP_MODULE_AVAILABLE = False
     DomoticzMCPServer = None
+    MCP_VERSION = "none"
 
 class BasePlugin:
     """Main Domoticz MCP Server Plugin class"""
@@ -107,11 +111,12 @@ class BasePlugin:
         # Debug information
         Domoticz.Debug(f"Plugin path: {self.plugin_path}")
         Domoticz.Debug(f"MCP module available: {MCP_MODULE_AVAILABLE}")
+        Domoticz.Debug(f"MCP version: {MCP_VERSION}")
         
         # Check if MCP module is available
         if not MCP_MODULE_AVAILABLE:
             Domoticz.Error("MCP module not available. Server cannot be started.")
-            Domoticz.Error("Please ensure domoticz_mcp.py is in the plugin directory and has no syntax errors.")
+            Domoticz.Error("Please ensure domoticz_mcp.py or domoticz_mcp_simple.py is in the plugin directory and has no syntax errors.")
             return
         
         # Create status device
@@ -306,6 +311,7 @@ class BasePlugin:
                     "status": status_text,
                     "host": self.host,
                     "port": self.port,
+                    "version": MCP_VERSION,
                     "uptime": int(time.time() - self.server_start_time) if self.server_start_time else 0,
                     "last_check": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "restart_attempts": self.restart_attempts
