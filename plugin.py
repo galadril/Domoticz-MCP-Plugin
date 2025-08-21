@@ -93,7 +93,7 @@ class DomoticzMCPServer:
     A Model Context Protocol server that provides secure access to Domoticz home automation APIs.
     """
     
-    def __init__(self, host: str = "127.0.0.1", port: int = 8765):
+    def __init__(self, host: str = "0.0.0.0", port: int = 8765):
         """Initialize the Domoticz MCP Server with full protocol compliance"""
         self.host = host
         self.port = port
@@ -588,7 +588,7 @@ class BasePlugin:
         self.run_again = 6
         self.health_check_interval = 30
         self.auto_start_server = True
-        self.host = "127.0.0.1"
+        self.host = "0.0.0.0"
         self.port = 8765
         self.plugin_path = plugin_path
         self.server_running = False
@@ -697,12 +697,16 @@ class BasePlugin:
     def _run_server_async(self):
         """Run the MCP server in an async event loop"""
         try:
+            Domoticz.Log("DIAGNOSTIC: Starting async server thread")
+            
             # Create new event loop for this thread
             self.event_loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.event_loop)
+            Domoticz.Log("DIAGNOSTIC: Event loop created")
             
             # Create and start MCP server
             self.mcp_server = DomoticzMCPServer(host=self.host, port=self.port)
+            Domoticz.Log(f"DIAGNOSTIC: MCP server instance created for {self.host}:{self.port}")
             
             # Run the server
             self.event_loop.run_until_complete(self._async_server_main())
@@ -722,18 +726,28 @@ class BasePlugin:
     async def _async_server_main(self):
         """Main async server loop"""
         try:
+            Domoticz.Log("DIAGNOSTIC: Starting server in async loop")
+            
             # Start the server
             self.server_runner = await self.mcp_server.start_server()
+            Domoticz.Log(f"DIAGNOSTIC: Server runner created: {self.server_runner is not None}")
             
-            # Keep the server running
-            while self.server_running:
-                await asyncio.sleep(1)
+            if self.server_runner:
+                Domoticz.Log("DIAGNOSTIC: Server started successfully, entering keep-alive loop")
+                # Keep the server running
+                while self.server_running:
+                    await asyncio.sleep(1)
+                Domoticz.Log("DIAGNOSTIC: Keep-alive loop ended")
+            else:
+                Domoticz.Error("DIAGNOSTIC: Server runner is None - server failed to start")
                 
         except Exception as e:
             Domoticz.Error(f"Async server error: {str(e)}")
+            Domoticz.Error(traceback.format_exc())
             raise
         finally:
             # Cleanup
+            Domoticz.Log("DIAGNOSTIC: Cleaning up server runner")
             if self.server_runner:
                 try:
                     await self.server_runner.cleanup()
@@ -780,37 +794,42 @@ class BasePlugin:
     def _check_server_health(self):
         """Check if the MCP server is responding"""
         try:
-            # Use localhost/127.0.0.1 for health check instead of 127.0.0.1
-            # since 127.0.0.1 is only for binding, not for making requests
-            health_host = "127.0.0.1" if self.host == "127.0.0.1" else self.host
+            # Use localhost/127.0.0.1 for health check instead of 0.0.0.0
+            # since 0.0.0.0 is only for binding, not for making requests
+            health_host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
             health_url = f"http://{health_host}:{self.port}/health"
-            Domoticz.Debug(f"Checking server health at: {health_url}")
+            
+            # Enhanced debugging
+            Domoticz.Log(f"DIAGNOSTIC: Health check - Original host: {self.host}")
+            Domoticz.Log(f"DIAGNOSTIC: Health check - Resolved host: {health_host}")
+            Domoticz.Log(f"DIAGNOSTIC: Health check - Full URL: {health_url}")
+            
             response = requests.get(health_url, timeout=3)
             
             if response.status_code == 200:
                 data = response.json()
                 is_healthy = data.get("status") == "healthy"
-                Domoticz.Debug(f"Health check response: {data}")
+                Domoticz.Log(f"DIAGNOSTIC: Health check SUCCESS - Response: {data}")
                 return is_healthy
             else:
-                Domoticz.Debug(f"Health check failed with status code: {response.status_code}")
+                Domoticz.Log(f"DIAGNOSTIC: Health check FAILED - Status code: {response.status_code}")
                 return False
                 
         except requests.exceptions.ConnectionError as e:
-            Domoticz.Debug(f"Health check connection error: {str(e)}")
+            Domoticz.Log(f"DIAGNOSTIC: Health check CONNECTION ERROR: {str(e)}")
             return False
         except requests.exceptions.Timeout as e:
-            Domoticz.Debug(f"Health check timeout: {str(e)}")
+            Domoticz.Log(f"DIAGNOSTIC: Health check TIMEOUT: {str(e)}")
             return False
         except Exception as e:
-            Domoticz.Debug(f"Health check failed: {str(e)}")
+            Domoticz.Log(f"DIAGNOSTIC: Health check UNEXPECTED ERROR: {str(e)}")
             return False
 
     def _get_server_info(self):
         """Get server information"""
         try:
-            # Use localhost/127.0.0.1 for info request instead of 127.0.0.1
-            info_host = "127.0.0.1" if self.host == "127.0.0.1" else self.host
+            # Use localhost/127.0.0.1 for info request instead of 0.0.0.0
+            info_host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
             info_url = f"http://{info_host}:{self.port}/info"
             response = requests.get(info_url, timeout=5)
             
