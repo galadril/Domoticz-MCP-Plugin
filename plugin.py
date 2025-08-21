@@ -666,6 +666,10 @@ class BasePlugin:
         try:
             Domoticz.Log(f"Starting MCP Server on {self.host}:{self.port}")
             
+            # Set server_running to True BEFORE starting the thread
+            # so the async keep-alive loop doesn't exit immediately
+            self.server_running = True
+            
             # Create and start the server thread
             self.server_thread = threading.Thread(target=self._run_server_async, daemon=True)
             self.server_thread.start()
@@ -674,7 +678,6 @@ class BasePlugin:
             for attempt in range(5):
                 time.sleep(1)  # Wait 1 second between attempts
                 if self._check_server_health():
-                    self.server_running = True
                     self.server_start_time = time.time()
                     self.restart_attempts = 0
                     Domoticz.Log("MCP Server started successfully")
@@ -683,12 +686,14 @@ class BasePlugin:
                 else:
                     Domoticz.Debug(f"Health check attempt {attempt + 1}/5 failed, retrying...")
             
-            # If we get here, all health checks failed
+            # If we get here, all health checks failed - stop the server
+            self.server_running = False
             Domoticz.Error("Failed to start MCP Server - health check failed after 5 attempts")
             self._update_status_device(False, "Failed to start")
             return False
                 
         except Exception as e:
+            self.server_running = False
             Domoticz.Error(f"Error starting MCP Server: {str(e)}")
             Domoticz.Error(traceback.format_exc())
             self._update_status_device(False, f"Error: {str(e)}")
