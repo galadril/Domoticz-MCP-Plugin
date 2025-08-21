@@ -780,7 +780,10 @@ class BasePlugin:
     def _check_server_health(self):
         """Check if the MCP server is responding"""
         try:
-            health_url = f"http://{self.host}:{self.port}/health"
+            # Use localhost/127.0.0.1 for health check instead of 0.0.0.0
+            # since 0.0.0.0 is only for binding, not for making requests
+            health_host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
+            health_url = f"http://{health_host}:{self.port}/health"
             Domoticz.Debug(f"Checking server health at: {health_url}")
             response = requests.get(health_url, timeout=3)
             
@@ -806,7 +809,9 @@ class BasePlugin:
     def _get_server_info(self):
         """Get server information"""
         try:
-            info_url = f"http://{self.host}:{self.port}/info"
+            # Use localhost/127.0.0.1 for info request instead of 0.0.0.0
+            info_host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
+            info_url = f"http://{info_host}:{self.port}/info"
             response = requests.get(info_url, timeout=5)
             
             if response.status_code == 200:
