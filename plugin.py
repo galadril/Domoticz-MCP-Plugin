@@ -56,6 +56,27 @@ try:
     Domoticz.Debug("aiohttp available - full MCP server functionality enabled")
 except ImportError as e:
     AIOHTTP_AVAILABLE = False
+    # Create dummy classes for type hints when aiohttp is not available
+    class web:
+        class Application: pass
+        @staticmethod
+        def json_response(*args, **kwargs): pass
+        
+    class web_request:
+        class Request: pass
+        
+    class web_response:
+        class Response: pass
+        
+    class GracefulExit(Exception): pass
+    
+    class aiohttp_cors:
+        @staticmethod
+        def setup(*args, **kwargs): return None
+        
+        class ResourceOptions:
+            def __init__(self, **kwargs): pass
+    
     Domoticz.Error(f"aiohttp not available: {e}")
     Domoticz.Error("MCP server will run in simple mode without HTTP endpoints")
 
@@ -89,30 +110,36 @@ class DomoticzMCPServer:
         if not AIOHTTP_AVAILABLE:
             return
             
-        cors = aiohttp_cors.setup(self.app, defaults={
-            "*": aiohttp_cors.ResourceOptions(
-                allow_credentials=True,
-                expose_headers="*",
-                allow_headers="*",
-                allow_methods="*"
-            )
-        })
-        
-        # Add CORS to all routes
-        for route in list(self.app.router.routes()):
-            cors.add(route)
+        try:
+            cors = aiohttp_cors.setup(self.app, defaults={
+                "*": aiohttp_cors.ResourceOptions(
+                    allow_credentials=True,
+                    expose_headers="*",
+                    allow_headers="*",
+                    allow_methods="*"
+                )
+            })
+            
+            # Add CORS to all routes
+            for route in list(self.app.router.routes()):
+                cors.add(route)
+        except Exception as e:
+            Domoticz.Error(f"Error setting up CORS: {e}")
     
     def setup_routes(self):
         """Setup HTTP routes for MCP protocol"""
         if not AIOHTTP_AVAILABLE:
             return
             
-        # MCP endpoint (handles all MCP protocol messages)
-        self.app.router.add_post('/mcp', self.handle_mcp_request)
-        
-        # Health and info endpoints
-        self.app.router.add_get('/health', self.health_check)
-        self.app.router.add_get('/info', self.server_info)
+        try:
+            # MCP endpoint (handles all MCP protocol messages)
+            self.app.router.add_post('/mcp', self.handle_mcp_request)
+            
+            # Health and info endpoints
+            self.app.router.add_get('/health', self.health_check)
+            self.app.router.add_get('/info', self.server_info)
+        except Exception as e:
+            Domoticz.Error(f"Error setting up routes: {e}")
     
     async def health_check(self, request: web_request.Request) -> web_response.Response:
         """Health check endpoint"""
@@ -589,26 +616,23 @@ class BasePlugin:
         Domoticz.Debug(f"aiohttp available: {AIOHTTP_AVAILABLE}")
         Domoticz.Debug(f"MCP SDK available: {MCP_SDK_AVAILABLE}")
         
+        # Create status device first
+        self._create_status_device()
+        
         # Check if we can run the server
         if not AIOHTTP_AVAILABLE:
             Domoticz.Error("aiohttp module not available. Server cannot be started.")
             Domoticz.Error("Please install aiohttp: pip install aiohttp aiohttp-cors")
-            # Still create devices for monitoring
-            self._create_status_device()
+            self._update_status_device(False, "aiohttp not available")
+            Domoticz.Heartbeat(10)
             return
         
-        # Create status device
-        self._create_status_device()
-        
         # Start MCP server if auto start is enabled and aiohttp is available
-        if self.auto_start_server and AIOHTTP_AVAILABLE:
+        if self.auto_start_server:
             self._start_mcp_server()
         else:
-            if not AIOHTTP_AVAILABLE:
-                Domoticz.Log("MCP Server cannot start - aiohttp not available")
-                self._update_status_device(False, "aiohttp not available")
-            else:
-                Domoticz.Log("MCP Server auto-start is disabled. Use the switch to start manually.")
+            Domoticz.Log("MCP Server auto-start is disabled. Use the switch to start manually.")
+            self._update_status_device(False, "Auto-start disabled")
         
         Domoticz.Heartbeat(10)
         
