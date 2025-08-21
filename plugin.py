@@ -93,7 +93,7 @@ class DomoticzMCPServer:
     A Model Context Protocol server that provides secure access to Domoticz home automation APIs.
     """
     
-    def __init__(self, host: str = "0.0.0.0", port: int = 8765):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8765):
         """Initialize the Domoticz MCP Server with full protocol compliance"""
         self.host = host
         self.port = port
@@ -588,7 +588,7 @@ class BasePlugin:
         self.run_again = 6
         self.health_check_interval = 30
         self.auto_start_server = True
-        self.host = "0.0.0.0"
+        self.host = "127.0.0.1"
         self.port = 8765
         self.plugin_path = plugin_path
         self.server_running = False
@@ -780,9 +780,9 @@ class BasePlugin:
     def _check_server_health(self):
         """Check if the MCP server is responding"""
         try:
-            # Use localhost/127.0.0.1 for health check instead of 0.0.0.0
-            # since 0.0.0.0 is only for binding, not for making requests
-            health_host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
+            # Use localhost/127.0.0.1 for health check instead of 127.0.0.1
+            # since 127.0.0.1 is only for binding, not for making requests
+            health_host = "127.0.0.1" if self.host == "127.0.0.1" else self.host
             health_url = f"http://{health_host}:{self.port}/health"
             Domoticz.Debug(f"Checking server health at: {health_url}")
             response = requests.get(health_url, timeout=3)
@@ -809,8 +809,8 @@ class BasePlugin:
     def _get_server_info(self):
         """Get server information"""
         try:
-            # Use localhost/127.0.0.1 for info request instead of 0.0.0.0
-            info_host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
+            # Use localhost/127.0.0.1 for info request instead of 127.0.0.1
+            info_host = "127.0.0.1" if self.host == "127.0.0.1" else self.host
             info_url = f"http://{info_host}:{self.port}/info"
             response = requests.get(info_url, timeout=5)
             
