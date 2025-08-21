@@ -17,21 +17,51 @@ Authentication Model:
 import asyncio
 import json
 import logging
-from aiohttp import web, web_request, web_response
-from aiohttp.web_runner import GracefulExit
-import aiohttp_cors
-from typing import Dict, Any, List, Optional
 import sys
 import signal
-import requests
 import base64
 import hashlib
 from datetime import datetime
 import os
+from typing import Dict, Any, List, Optional
 
 # Configure logging first
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Check for required dependencies with graceful handling
+try:
+    from aiohttp import web, web_request, web_response
+    from aiohttp.web_runner import GracefulExit
+    import aiohttp_cors
+    AIOHTTP_AVAILABLE = True
+    logger.info("aiohttp available - full functionality enabled")
+except ImportError as e:
+    AIOHTTP_AVAILABLE = False
+    logger.warning(f"aiohttp not available: {e}")
+    # Define placeholder classes to prevent import errors
+    class web:
+        class Application: pass
+        class AppRunner: pass
+        class TCPSite: pass
+        class Response: pass
+        @staticmethod
+        def json_response(*args, **kwargs): pass
+    class web_request:
+        class Request: pass
+    class web_response:
+        class Response: pass
+    class GracefulExit(Exception): pass
+    aiohttp_cors = None
+
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+    logger.info("requests available")
+except ImportError as e:
+    REQUESTS_AVAILABLE = False
+    logger.warning(f"requests not available: {e}")
+    requests = None
 
 # Check MCP SDK availability for future use
 try:
@@ -54,6 +84,12 @@ class DomoticzMCPServer:
             host: Server host to bind to
             port: Server port to bind to
         """
+        if not AIOHTTP_AVAILABLE:
+            raise ImportError("aiohttp is required for the MCP server but is not available. Please install it with: pip install aiohttp aiohttp-cors")
+        
+        if not REQUESTS_AVAILABLE:
+            raise ImportError("requests is required for Domoticz API calls but is not available. Please install it with: pip install requests")
+        
         # Server settings
         self.host = host
         self.port = port
@@ -65,6 +101,10 @@ class DomoticzMCPServer:
 
     def setup_cors(self):
         """Setup CORS for cross-origin requests"""
+        if not aiohttp_cors:
+            logger.warning("aiohttp_cors not available - CORS not configured")
+            return
+            
         cors = aiohttp_cors.setup(self.app, defaults={
             "*": aiohttp_cors.ResourceOptions(
                 allow_credentials=True,
@@ -98,6 +138,8 @@ class DomoticzMCPServer:
             "version": "3.1.0",
             "protocol": "MCP 1.0",
             "mcp_sdk_available": MCP_SDK_AVAILABLE,
+            "aiohttp_available": AIOHTTP_AVAILABLE,
+            "requests_available": REQUESTS_AVAILABLE,
             "capabilities": {
                 "tools": True,
                 "logging": True,
