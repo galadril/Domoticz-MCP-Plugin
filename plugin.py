@@ -152,7 +152,7 @@ class DomoticzMCPServer:
         info = {
             "service": "Domoticz MCP Server",
             "version": "3.2.0",
-            "protocol": "MCP 1.0",
+            "protocol": "MCP 2024-11-05",
             "mcp_sdk_available": MCP_SDK_AVAILABLE,
             "aiohttp_available": AIOHTTP_AVAILABLE,
             "capabilities": {
@@ -162,7 +162,7 @@ class DomoticzMCPServer:
             },
             "authentication_model": "http_basic_auth_with_domoticz_credentials",
             "domoticz_url": "http://127.0.0.1:8080/json.htm",
-            "description": "MCP 1.0 compliant server for Domoticz home automation with HTTP Basic Authentication"
+            "description": "MCP 2024-11-05 compliant server for Domoticz home automation with HTTP Basic Authentication"
         }
         return web.json_response(info)
 
@@ -209,12 +209,14 @@ class DomoticzMCPServer:
                     "result": {
                         "protocolVersion": "2024-11-05",
                         "capabilities": {
-                            "tools": {},
+                            "tools": {
+                                "listChanged": False
+                            },
                             "logging": {}
                         },
                         "serverInfo": {
                             "name": "domoticz-mcp",
-                            "version": "3.1.0"
+                            "version": "3.2.0"
                         }
                     }
                 }
