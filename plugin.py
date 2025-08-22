@@ -151,7 +151,7 @@ class DomoticzMCPServer:
         """Server info endpoint"""
         info = {
             "service": "Domoticz MCP Server",
-            "version": "3.2.0",
+            "version": "3.3.0",
             "protocol": "MCP 2024-11-05",
             "mcp_sdk_available": MCP_SDK_AVAILABLE,
             "aiohttp_available": AIOHTTP_AVAILABLE,
@@ -161,7 +161,6 @@ class DomoticzMCPServer:
                 "dynamic_discovery": True
             },
             "authentication_model": "http_basic_auth_with_domoticz_credentials",
-            "domoticz_url": "http://127.0.0.1:8080/json.htm",
             "description": "MCP 2024-11-05 compliant server for Domoticz home automation with HTTP Basic Authentication"
         }
         return web.json_response(info)
@@ -201,7 +200,7 @@ class DomoticzMCPServer:
             
             Domoticz.Debug(f"MCP request: {method} from user: {username}")
             
-            # Handle initialization
+            # Handle initialization - Use exact MCP 2024-11-05 specification
             if method == 'initialize':
                 response = {
                     "jsonrpc": "2.0",
@@ -209,19 +208,16 @@ class DomoticzMCPServer:
                     "result": {
                         "protocolVersion": "2024-11-05",
                         "capabilities": {
-                            "tools": {
-                                "listChanged": False
-                            },
-                            "logging": {}
+                            "tools": {}
                         },
                         "serverInfo": {
-                            "name": "domoticz-mcp",
-                            "version": "3.2.0"
+                            "name": "domoticz-mcp-server",
+                            "version": "3.3.0"
                         }
                     }
                 }
             
-            # Handle tools/list
+            # Handle tools/list - Return clean tool schemas without internal parameters
             elif method == 'tools/list':
                 tools = await self.get_available_tools()
                 response = {
@@ -289,118 +285,188 @@ class DomoticzMCPServer:
             return web.json_response(error_response, status=500)
 
     async def get_available_tools(self) -> List[Dict[str, Any]]:
-        """Get all available MCP tools with proper schema"""
-        # No credentials needed in tool schemas - MCP server handles authentication
+        """Get all available MCP tools with clean schemas - NO authentication parameters"""
         return [
             {
-                "name": "get_status",
+                "name": "domoticz_get_status",
                 "description": "Get Domoticz system status information",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
-                    "required": []
+                    "required": [],
+                    "additionalProperties": False
                 }
             },
             {
-                "name": "get_version",
+                "name": "domoticz_get_version",
                 "description": "Get Domoticz version information",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
-                    "required": []
+                    "required": [],
+                    "additionalProperties": False
                 }
             },
             {
-                "name": "list_devices",
+                "name": "domoticz_list_devices",
                 "description": "List all Domoticz devices with optional filtering",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "filter": {"type": "string", "enum": ["all", "light", "weather", "temperature", "utility"], "default": "all"},
-                        "used": {"type": "boolean", "default": True}
+                        "filter": {
+                            "type": "string", 
+                            "enum": ["all", "light", "weather", "temperature", "utility"], 
+                            "default": "all",
+                            "description": "Filter devices by type"
+                        },
+                        "used": {
+                            "type": "boolean", 
+                            "default": True,
+                            "description": "Only show devices that are in use"
+                        }
                     },
-                    "required": []
+                    "required": [],
+                    "additionalProperties": False
                 }
             },
             {
-                "name": "device_status",
+                "name": "domoticz_device_status",
                 "description": "Get detailed status of a specific device",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "idx": {"type": "integer", "description": "Device index"}
+                        "idx": {
+                            "type": "integer", 
+                            "description": "Device index",
+                            "minimum": 1
+                        }
                     },
-                    "required": ["idx"]
+                    "required": ["idx"],
+                    "additionalProperties": False
                 }
             },
             {
-                "name": "switch_device",
+                "name": "domoticz_switch_device",
                 "description": "Control device switching (on/off/toggle) and dimmer levels",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "idx": {"type": "integer", "description": "Device index"},
-                        "command": {"type": "string", "enum": ["On", "Off", "Toggle", "Set Level"], "description": "Switch command"},
-                        "level": {"type": "integer", "minimum": 0, "maximum": 100, "description": "Dimmer level (0-100)"}
+                        "idx": {
+                            "type": "integer", 
+                            "description": "Device index",
+                            "minimum": 1
+                        },
+                        "command": {
+                            "type": "string", 
+                            "enum": ["On", "Off", "Toggle", "Set Level"], 
+                            "description": "Switch command"
+                        },
+                        "level": {
+                            "type": "integer", 
+                            "minimum": 0, 
+                            "maximum": 100, 
+                            "description": "Dimmer level (0-100, only required for Set Level command)"
+                        }
                     },
-                    "required": ["idx", "command"]
+                    "required": ["idx", "command"],
+                    "additionalProperties": False
                 }
             },
             {
-                "name": "list_scenes",
+                "name": "domoticz_list_scenes",
                 "description": "List all scenes and groups",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
-                    "required": []
+                    "required": [],
+                    "additionalProperties": False
                 }
             },
             {
-                "name": "run_scene",
+                "name": "domoticz_run_scene",
                 "description": "Execute a scene or group",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "idx": {"type": "integer", "description": "Scene index"},
-                        "action": {"type": "string", "enum": ["On", "Off"], "default": "On"}
+                        "idx": {
+                            "type": "integer", 
+                            "description": "Scene index",
+                            "minimum": 1
+                        },
+                        "action": {
+                            "type": "string", 
+                            "enum": ["On", "Off"], 
+                            "default": "On",
+                            "description": "Scene action"
+                        }
                     },
-                    "required": ["idx"]
+                    "required": ["idx"],
+                    "additionalProperties": False
                 }
             },
             {
-                "name": "set_thermostat",
+                "name": "domoticz_set_thermostat",
                 "description": "Set thermostat setpoint",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "idx": {"type": "integer", "description": "Thermostat device index"},
-                        "setpoint": {"type": "number", "description": "Temperature setpoint"}
+                        "idx": {
+                            "type": "integer", 
+                            "description": "Thermostat device index",
+                            "minimum": 1
+                        },
+                        "setpoint": {
+                            "type": "number", 
+                            "description": "Temperature setpoint"
+                        }
                     },
-                    "required": ["idx", "setpoint"]
+                    "required": ["idx", "setpoint"],
+                    "additionalProperties": False
                 }
             },
             {
-                "name": "send_notification",
+                "name": "domoticz_send_notification",
                 "description": "Send notification through Domoticz",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "subject": {"type": "string", "description": "Notification subject"},
-                        "message": {"type": "string", "description": "Notification message"},
-                        "priority": {"type": "integer", "minimum": 0, "maximum": 4, "default": 0}
+                        "subject": {
+                            "type": "string", 
+                            "description": "Notification subject",
+                            "minLength": 1
+                        },
+                        "message": {
+                            "type": "string", 
+                            "description": "Notification message",
+                            "minLength": 1
+                        },
+                        "priority": {
+                            "type": "integer", 
+                            "minimum": 0, 
+                            "maximum": 4, 
+                            "default": 0,
+                            "description": "Notification priority level"
+                        }
                     },
-                    "required": ["subject", "message"]
+                    "required": ["subject", "message"],
+                    "additionalProperties": False
                 }
             },
             {
-                "name": "get_log",
+                "name": "domoticz_get_log",
                 "description": "Retrieve Domoticz logs",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "log_type": {"type": "string", "enum": ["status", "error", "notification"], "default": "status"}
+                        "log_type": {
+                            "type": "string", 
+                            "enum": ["status", "error", "notification"], 
+                            "default": "status",
+                            "description": "Type of log to retrieve"
+                        }
                     },
-                    "required": []
+                    "required": [],
+                    "additionalProperties": False
                 }
             }
         ]
@@ -429,16 +495,33 @@ class DomoticzMCPServer:
             Domoticz.Debug(f"Using Domoticz URL: {domoticz_url}")
             Domoticz.Debug(f"Authenticated user: {domoticz_username}")
             
+            # Map tool names to legacy names for backward compatibility
+            tool_mapping = {
+                "domoticz_get_status": "get_status",
+                "domoticz_get_version": "get_version", 
+                "domoticz_list_devices": "list_devices",
+                "domoticz_device_status": "device_status",
+                "domoticz_switch_device": "switch_device",
+                "domoticz_list_scenes": "list_scenes",
+                "domoticz_run_scene": "run_scene",
+                "domoticz_set_thermostat": "set_thermostat",
+                "domoticz_send_notification": "send_notification",
+                "domoticz_get_log": "get_log"
+            }
+            
+            # Get actual tool name (support both new prefixed and legacy names)
+            actual_tool_name = tool_mapping.get(name, name)
+            
             # Execute the appropriate tool
-            if name == "get_status":
+            if actual_tool_name == "get_status":
                 result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password, 
                                               {"type":"command","param":"status"})
                 
-            elif name == "get_version":
+            elif actual_tool_name == "get_version":
                 result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
                                               {"type":"command","param":"getversion"})
                 
-            elif name == "list_devices":
+            elif actual_tool_name == "list_devices":
                 filter_type = arguments.get("filter", "all")
                 used = arguments.get("used", True)
                 params = {"type":"command","param":"getdevices","filter":filter_type}
@@ -446,14 +529,14 @@ class DomoticzMCPServer:
                     params["used"] = "true"
                 result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password, params)
                 
-            elif name == "device_status":
+            elif actual_tool_name == "device_status":
                 idx = arguments.get("idx")
                 if not idx:
                     return {"error": "idx parameter is required"}
                 result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
                                               {"type":"command","param":"getdevices","rid":str(idx)})
                 
-            elif name == "switch_device":
+            elif actual_tool_name == "switch_device":
                 idx = arguments.get("idx")
                 command = arguments.get("command")
                 level = arguments.get("level")
@@ -464,11 +547,11 @@ class DomoticzMCPServer:
                     params["level"] = level
                 result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password, params)
                 
-            elif name == "list_scenes":
+            elif actual_tool_name == "list_scenes":
                 result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
                                               {"type":"command","param":"getscenes"})
                 
-            elif name == "run_scene":
+            elif actual_tool_name == "run_scene":
                 idx = arguments.get("idx")
                 action = arguments.get("action", "On")
                 if not idx:
@@ -476,7 +559,7 @@ class DomoticzMCPServer:
                 result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
                                               {"type":"command","param":"switchscene","idx":idx,"switchcmd":action})
                 
-            elif name == "set_thermostat":
+            elif actual_tool_name == "set_thermostat":
                 idx = arguments.get("idx")
                 setpoint = arguments.get("setpoint")
                 if not idx or setpoint is None:
@@ -484,7 +567,7 @@ class DomoticzMCPServer:
                 result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
                                               {"type":"command","param":"setsetpoint","idx":idx,"setpoint":setpoint})
                 
-            elif name == "send_notification":
+            elif actual_tool_name == "send_notification":
                 subject = arguments.get("subject")
                 message = arguments.get("message")
                 priority = arguments.get("priority", 0)
@@ -498,7 +581,7 @@ class DomoticzMCPServer:
                     "priority": priority
                 })
                 
-            elif name == "get_log":
+            elif actual_tool_name == "get_log":
                 log_type = arguments.get("log_type", "status")
                 result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
                                               {"type":"command","param":"getlog","log":log_type})
@@ -574,11 +657,11 @@ class DomoticzMCPServer:
         site = web.TCPSite(runner, self.host, self.port)
         await site.start()
         
-        Domoticz.Log(f"Domoticz MCP Server v3.2.0 started on http://{self.host}:{self.port}")
+        Domoticz.Log(f"Domoticz MCP Server v3.3.0 started on http://{self.host}:{self.port}")
         Domoticz.Log(f"Health check: http://{self.host}:{self.port}/health")
         Domoticz.Log(f"Server info: http://{self.host}:{self.port}/info")
         Domoticz.Log(f"MCP endpoint: http://{self.host}:{self.port}/mcp")
-        Domoticz.Log(f"Protocol: MCP 1.0 compliant")
+        Domoticz.Log(f"Protocol: MCP 2024-11-05 compliant")
         Domoticz.Log(f"Authentication: HTTP Basic Auth with Domoticz credentials")
         
         return runner
