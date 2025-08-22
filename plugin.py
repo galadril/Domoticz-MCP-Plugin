@@ -3,6 +3,7 @@
     <description>
         Plugin for running Domoticz MCP (Model Context Protocol) Server.
         Provides AI assistant access to Domoticz functionality through MCP protocol.
+        Authentication is handled via HTTP Basic Auth using your Domoticz credentials.
     </description>
     <params>
         <param field="Mode1" label="Auto Start Server" width="75px">
@@ -12,6 +13,7 @@
             </options>
         </param>
         <param field="Mode2" label="Health Check interval (seconds)" width="30px" required="true" default="30"/>
+        <param field="Mode3" label="Domoticz URL Override" width="200px" required="false" default="" placeholder="Leave empty for localhost:8080"/>
         <param field="Mode6" label="Debug" width="200px">
             <options>
                 <option label="None" value="0" default="true"/>
@@ -149,7 +151,7 @@ class DomoticzMCPServer:
         """Server info endpoint"""
         info = {
             "service": "Domoticz MCP Server",
-            "version": "3.1.0",
+            "version": "3.2.0",
             "protocol": "MCP 1.0",
             "mcp_sdk_available": MCP_SDK_AVAILABLE,
             "aiohttp_available": AIOHTTP_AVAILABLE,
@@ -158,20 +160,46 @@ class DomoticzMCPServer:
                 "logging": True,
                 "dynamic_discovery": True
             },
-            "authentication_model": "per_request_domoticz_credentials",
-            "description": "MCP 1.0 compliant server for Domoticz home automation"
+            "authentication_model": "http_basic_auth_with_domoticz_credentials",
+            "domoticz_url": "http://127.0.0.1:8080/json.htm",
+            "description": "MCP 1.0 compliant server for Domoticz home automation with HTTP Basic Authentication"
         }
         return web.json_response(info)
 
     async def handle_mcp_request(self, request: web_request.Request) -> web_response.Response:
-        """Handle all MCP protocol requests with full compliance"""
+        """Handle all MCP protocol requests with full compliance and authentication"""
         try:
+            # Check for HTTP Basic Authentication
+            auth_header = request.headers.get('Authorization')
+            if not auth_header or not auth_header.startswith('Basic '):
+                return web.json_response(
+                    {"error": "Authentication required. Use HTTP Basic Auth with your Domoticz credentials."},
+                    status=401,
+                    headers={'WWW-Authenticate': 'Basic realm="Domoticz MCP Server"'}
+                )
+            
+            # Parse Basic Auth credentials
+            try:
+                auth_data = auth_header[6:]  # Remove 'Basic ' prefix
+                decoded = base64.b64decode(auth_data).decode('utf-8')
+                username, password = decoded.split(':', 1)
+            except (ValueError, UnicodeDecodeError):
+                return web.json_response(
+                    {"error": "Invalid authentication format"},
+                    status=401,
+                    headers={'WWW-Authenticate': 'Basic realm="Domoticz MCP Server"'}
+                )
+            
+            # Store credentials in request for tool execution
+            request['domoticz_username'] = username
+            request['domoticz_password'] = password
+            
             data = await request.json()
             method = data.get('method')
             params = data.get('params', {})
             request_id = data.get('id')
             
-            Domoticz.Debug(f"MCP request: {method}")
+            Domoticz.Debug(f"MCP request: {method} from user: {username}")
             
             # Handle initialization
             if method == 'initialize':
@@ -207,7 +235,8 @@ class DomoticzMCPServer:
                 tool_name = params.get('name')
                 arguments = params.get('arguments', {})
                 
-                result = await self.execute_domoticz_tool(tool_name, arguments)
+                # Pass request object to get credentials
+                result = await self.execute_domoticz_tool(tool_name, arguments, request)
                 
                 response = {
                     "jsonrpc": "2.0",
@@ -259,18 +288,15 @@ class DomoticzMCPServer:
 
     async def get_available_tools(self) -> List[Dict[str, Any]]:
         """Get all available MCP tools with proper schema"""
+        # No credentials needed in tool schemas - MCP server handles authentication
         return [
             {
                 "name": "get_status",
                 "description": "Get Domoticz system status information",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {
-                        "domoticz_url": {"type": "string", "description": "Domoticz JSON API URL"},
-                        "domoticz_username": {"type": "string", "description": "Domoticz username"},
-                        "domoticz_password": {"type": "string", "description": "Domoticz password"}
-                    },
-                    "required": ["domoticz_url"]
+                    "properties": {},
+                    "required": []
                 }
             },
             {
@@ -278,12 +304,8 @@ class DomoticzMCPServer:
                 "description": "Get Domoticz version information",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {
-                        "domoticz_url": {"type": "string", "description": "Domoticz JSON API URL"},
-                        "domoticz_username": {"type": "string", "description": "Domoticz username"},
-                        "domoticz_password": {"type": "string", "description": "Domoticz password"}
-                    },
-                    "required": ["domoticz_url"]
+                    "properties": {},
+                    "required": []
                 }
             },
             {
@@ -292,13 +314,10 @@ class DomoticzMCPServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "domoticz_url": {"type": "string", "description": "Domoticz JSON API URL"},
-                        "domoticz_username": {"type": "string", "description": "Domoticz username"},
-                        "domoticz_password": {"type": "string", "description": "Domoticz password"},
                         "filter": {"type": "string", "enum": ["all", "light", "weather", "temperature", "utility"], "default": "all"},
                         "used": {"type": "boolean", "default": True}
                     },
-                    "required": ["domoticz_url"]
+                    "required": []
                 }
             },
             {
@@ -307,12 +326,9 @@ class DomoticzMCPServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "domoticz_url": {"type": "string", "description": "Domoticz JSON API URL"},
-                        "domoticz_username": {"type": "string", "description": "Domoticz username"},
-                        "domoticz_password": {"type": "string", "description": "Domoticz password"},
                         "idx": {"type": "integer", "description": "Device index"}
                     },
-                    "required": ["domoticz_url", "idx"]
+                    "required": ["idx"]
                 }
             },
             {
@@ -321,14 +337,11 @@ class DomoticzMCPServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "domoticz_url": {"type": "string", "description": "Domoticz JSON API URL"},
-                        "domoticz_username": {"type": "string", "description": "Domoticz username"},
-                        "domoticz_password": {"type": "string", "description": "Domoticz password"},
                         "idx": {"type": "integer", "description": "Device index"},
                         "command": {"type": "string", "enum": ["On", "Off", "Toggle", "Set Level"], "description": "Switch command"},
                         "level": {"type": "integer", "minimum": 0, "maximum": 100, "description": "Dimmer level (0-100)"}
                     },
-                    "required": ["domoticz_url", "idx", "command"]
+                    "required": ["idx", "command"]
                 }
             },
             {
@@ -336,12 +349,8 @@ class DomoticzMCPServer:
                 "description": "List all scenes and groups",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {
-                        "domoticz_url": {"type": "string", "description": "Domoticz JSON API URL"},
-                        "domoticz_username": {"type": "string", "description": "Domoticz username"},
-                        "domoticz_password": {"type": "string", "description": "Domoticz password"}
-                    },
-                    "required": ["domoticz_url"]
+                    "properties": {},
+                    "required": []
                 }
             },
             {
@@ -350,13 +359,10 @@ class DomoticzMCPServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "domoticz_url": {"type": "string", "description": "Domoticz JSON API URL"},
-                        "domoticz_username": {"type": "string", "description": "Domoticz username"},
-                        "domoticz_password": {"type": "string", "description": "Domoticz password"},
                         "idx": {"type": "integer", "description": "Scene index"},
                         "action": {"type": "string", "enum": ["On", "Off"], "default": "On"}
                     },
-                    "required": ["domoticz_url", "idx"]
+                    "required": ["idx"]
                 }
             },
             {
@@ -365,13 +371,10 @@ class DomoticzMCPServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "domoticz_url": {"type": "string", "description": "Domoticz JSON API URL"},
-                        "domoticz_username": {"type": "string", "description": "Domoticz username"},
-                        "domoticz_password": {"type": "string", "description": "Domoticz password"},
                         "idx": {"type": "integer", "description": "Thermostat device index"},
                         "setpoint": {"type": "number", "description": "Temperature setpoint"}
                     },
-                    "required": ["domoticz_url", "idx", "setpoint"]
+                    "required": ["idx", "setpoint"]
                 }
             },
             {
@@ -380,14 +383,11 @@ class DomoticzMCPServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "domoticz_url": {"type": "string", "description": "Domoticz JSON API URL"},
-                        "domoticz_username": {"type": "string", "description": "Domoticz username"},
-                        "domoticz_password": {"type": "string", "description": "Domoticz password"},
                         "subject": {"type": "string", "description": "Notification subject"},
                         "message": {"type": "string", "description": "Notification message"},
                         "priority": {"type": "integer", "minimum": 0, "maximum": 4, "default": 0}
                     },
-                    "required": ["domoticz_url", "subject", "message"]
+                    "required": ["subject", "message"]
                 }
             },
             {
@@ -396,32 +396,36 @@ class DomoticzMCPServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "domoticz_url": {"type": "string", "description": "Domoticz JSON API URL"},
-                        "domoticz_username": {"type": "string", "description": "Domoticz username"},
-                        "domoticz_password": {"type": "string", "description": "Domoticz password"},
                         "log_type": {"type": "string", "enum": ["status", "error", "notification"], "default": "status"}
                     },
-                    "required": ["domoticz_url"]
+                    "required": []
                 }
             }
         ]
 
-    async def execute_domoticz_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute_domoticz_tool(self, name: str, arguments: Dict[str, Any], request: web_request.Request = None) -> Dict[str, Any]:
         """Execute a Domoticz tool with the given arguments"""
         try:
             Domoticz.Debug(f"Executing tool: {name}")
             
-            # Extract Domoticz credentials from arguments
-            domoticz_url = arguments.get("domoticz_url")
-            domoticz_username = arguments.get("domoticz_username", "")
-            domoticz_password = arguments.get("domoticz_password", "")
+            # Get credentials from authenticated request
+            if request:
+                domoticz_username = request.get('domoticz_username', '')
+                domoticz_password = request.get('domoticz_password', '')
+            else:
+                domoticz_username = ''
+                domoticz_password = ''
             
-            if not domoticz_url:
-                return {"error": "domoticz_url is required in arguments"}
+            # Default to localhost:8080 for Domoticz URL (same host as MCP server)
+            domoticz_url = "http://127.0.0.1:8080/json.htm"
             
-            # Remove credentials from arguments before processing tool logic
-            tool_args = {k: v for k, v in arguments.items() 
-                        if k not in ["domoticz_url", "domoticz_username", "domoticz_password"]}
+            # Allow override from plugin configuration if set
+            plugin_instance = _plugin
+            if plugin_instance.default_domoticz_url:
+                domoticz_url = plugin_instance.default_domoticz_url
+            
+            Domoticz.Debug(f"Using Domoticz URL: {domoticz_url}")
+            Domoticz.Debug(f"Authenticated user: {domoticz_username}")
             
             # Execute the appropriate tool
             if name == "get_status":
@@ -433,24 +437,24 @@ class DomoticzMCPServer:
                                               {"type":"command","param":"getversion"})
                 
             elif name == "list_devices":
-                filter_type = tool_args.get("filter", "all")
-                used = tool_args.get("used", True)
+                filter_type = arguments.get("filter", "all")
+                used = arguments.get("used", True)
                 params = {"type":"command","param":"getdevices","filter":filter_type}
                 if used:
                     params["used"] = "true"
                 result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password, params)
                 
             elif name == "device_status":
-                idx = tool_args.get("idx")
+                idx = arguments.get("idx")
                 if not idx:
                     return {"error": "idx parameter is required"}
                 result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
                                               {"type":"command","param":"getdevices","rid":str(idx)})
                 
             elif name == "switch_device":
-                idx = tool_args.get("idx")
-                command = tool_args.get("command")
-                level = tool_args.get("level")
+                idx = arguments.get("idx")
+                command = arguments.get("command")
+                level = arguments.get("level")
                 if not idx or not command:
                     return {"error": "idx and command parameters are required"}
                 params = {"type":"command","param":"switchlight","idx":idx,"switchcmd":command}
@@ -463,25 +467,25 @@ class DomoticzMCPServer:
                                               {"type":"command","param":"getscenes"})
                 
             elif name == "run_scene":
-                idx = tool_args.get("idx")
-                action = tool_args.get("action", "On")
+                idx = arguments.get("idx")
+                action = arguments.get("action", "On")
                 if not idx:
                     return {"error": "idx parameter is required"}
                 result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
                                               {"type":"command","param":"switchscene","idx":idx,"switchcmd":action})
                 
             elif name == "set_thermostat":
-                idx = tool_args.get("idx")
-                setpoint = tool_args.get("setpoint")
+                idx = arguments.get("idx")
+                setpoint = arguments.get("setpoint")
                 if not idx or setpoint is None:
                     return {"error": "idx and setpoint parameters are required"}
                 result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
                                               {"type":"command","param":"setsetpoint","idx":idx,"setpoint":setpoint})
                 
             elif name == "send_notification":
-                subject = tool_args.get("subject")
-                message = tool_args.get("message")
-                priority = tool_args.get("priority", 0)
+                subject = arguments.get("subject")
+                message = arguments.get("message")
+                priority = arguments.get("priority", 0)
                 if not subject or not message:
                     return {"error": "subject and message parameters are required"}
                 result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password, {
@@ -493,7 +497,7 @@ class DomoticzMCPServer:
                 })
                 
             elif name == "get_log":
-                log_type = tool_args.get("log_type", "status")
+                log_type = arguments.get("log_type", "status")
                 result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
                                               {"type":"command","param":"getlog","log":log_type})
                 
@@ -568,12 +572,12 @@ class DomoticzMCPServer:
         site = web.TCPSite(runner, self.host, self.port)
         await site.start()
         
-        Domoticz.Log(f"Domoticz MCP Server v3.1.0 started on http://{self.host}:{self.port}")
+        Domoticz.Log(f"Domoticz MCP Server v3.2.0 started on http://{self.host}:{self.port}")
         Domoticz.Log(f"Health check: http://{self.host}:{self.port}/health")
         Domoticz.Log(f"Server info: http://{self.host}:{self.port}/info")
         Domoticz.Log(f"MCP endpoint: http://{self.host}:{self.port}/mcp")
         Domoticz.Log(f"Protocol: MCP 1.0 compliant")
-        Domoticz.Log(f"Authentication: Per-request Domoticz credentials")
+        Domoticz.Log(f"Authentication: HTTP Basic Auth with Domoticz credentials")
         
         return runner
 
@@ -597,6 +601,9 @@ class BasePlugin:
         self.restart_attempts = 0
         self.max_restart_attempts = 3
         
+        # Optional Domoticz URL override
+        self.default_domoticz_url = ""
+
     def onStart(self):
         Domoticz.Debug("onStart called")
         
@@ -607,6 +614,14 @@ class BasePlugin:
         # Set auto start preference
         self.auto_start_server = Parameters["Mode1"] == "true"
         Domoticz.Log(f"Auto start server is {'enabled' if self.auto_start_server else 'disabled'}")
+        
+        # Set optional Domoticz URL override
+        self.default_domoticz_url = Parameters.get("Mode3", "").strip()
+        
+        if self.default_domoticz_url:
+            Domoticz.Log(f"Domoticz URL override: {self.default_domoticz_url}")
+        else:
+            Domoticz.Log("Using default Domoticz URL: localhost:8080")
         
         # Set Debugging
         Domoticz.Debugging(int(Parameters["Mode6"]))
