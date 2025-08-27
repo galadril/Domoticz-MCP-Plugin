@@ -1,9 +1,9 @@
 ﻿"""
-<plugin key="Domoticz-MCP-Server" name="Domoticz MCP Server Plugin" author="Mark Heinis" version="1.0.0" wikilink="https://github.com/galadril/Domoticz-MCP-Service/wiki" externallink="https://github.com/galadril/Domoticz-MCP-Service">
+<plugin key="Domoticz-MCP-Server" name="Domoticz MCP Server Plugin" author="Mark Heinis" version="2.0.0" wikilink="https://github.com/galadril/Domoticz-MCP-Service/wiki" externallink="https://github.com/galadril/Domoticz-MCP-Service">
     <description>
         Plugin for running Domoticz MCP (Model Context Protocol) Server.
         Provides AI assistant access to Domoticz functionality through MCP protocol.
-        Authentication is handled via HTTP Basic Auth using your Domoticz credentials.
+        Authentication is handled via OAuth 2.1 flow - plugin acts as OAuth client to Domoticz.
     </description>
     <params>
         <param field="Mode1" label="Auto Start Server" width="75px">
@@ -41,8 +41,10 @@ import sys
 import hashlib
 import base64
 import logging
+import secrets
+import urllib.parse
 from typing import Optional, Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Add the plugin directory to Python path to ensure imports work
 plugin_path = os.path.dirname(os.path.realpath(__file__))
@@ -89,18 +91,145 @@ try:
 except ImportError:
     MCP_SDK_AVAILABLE = False
 
+class DomoticzOAuthClient:
+    """OAuth client for authenticating with Domoticz - follows OAuth 2.1 standard"""
+    
+    def __init__(self, domoticz_base_url: str = "http://127.0.0.1:8080"):
+        self.domoticz_base_url = domoticz_base_url.rstrip('/')
+        self.session = requests.Session()
+        self.oauth_config = None
+        
+    def discover_oauth_endpoints(self):
+        """Discover OAuth endpoints from Domoticz's .well-known configuration"""
+        try:
+            # Try to get OAuth configuration from Domoticz
+            well_known_url = f"{self.domoticz_base_url}/.well-known/openid-configuration"
+            response = self.session.get(well_known_url, timeout=10)
+            
+            if response.status_code == 200:
+                self.oauth_config = response.json()
+                Domoticz.Log(f"Discovered Domoticz OAuth endpoints: {well_known_url}")
+                return True
+            else:
+                Domoticz.Error(f"Failed to discover OAuth endpoints: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            Domoticz.Error(f"Error discovering OAuth endpoints: {e}")
+            return False
+    
+    def get_authorization_url(self, client_id: str, redirect_uri: str, state: str = None, 
+                            code_challenge: str = None, code_challenge_method: str = None):
+        """Generate authorization URL for OAuth flow"""
+        if not self.oauth_config:
+            if not self.discover_oauth_endpoints():
+                return None
+                
+        auth_endpoint = self.oauth_config.get('authorization_endpoint')
+        if not auth_endpoint:
+            return None
+            
+        params = {
+            'response_type': 'code',
+            'client_id': client_id,
+            'redirect_uri': redirect_uri,
+            'scope': 'read write'
+        }
+        
+        if state:
+            params['state'] = state
+        if code_challenge:
+            params['code_challenge'] = code_challenge
+            params['code_challenge_method'] = code_challenge_method or 'S256'
+            
+        return f"{auth_endpoint}?{urllib.parse.urlencode(params)}"
+    
+    def exchange_code_for_tokens(self, client_id: str, client_secret: str, 
+                               authorization_code: str, redirect_uri: str, 
+                               code_verifier: str = None):
+        """Exchange authorization code for access token"""
+        if not self.oauth_config:
+            if not self.discover_oauth_endpoints():
+                return None
+                
+        token_endpoint = self.oauth_config.get('token_endpoint')
+        if not token_endpoint:
+            return None
+            
+        token_data = {
+            'grant_type': 'authorization_code',
+            'client_id': client_id,
+            'client_secret': client_secret,
+            'code': authorization_code,
+            'redirect_uri': redirect_uri
+        }
+        
+        if code_verifier:
+            token_data['code_verifier'] = code_verifier
+            
+        try:
+            response = self.session.post(
+                token_endpoint,
+                data=token_data,
+                headers={'Content-Type': 'application/x-www-form-urlencoded'},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                token_response = response.json()
+                Domoticz.Log("Successfully obtained OAuth tokens from Domoticz")
+                return token_response
+            else:
+                Domoticz.Error(f"Failed to exchange code for tokens: {response.status_code} - {response.text}")
+                return None
+                
+        except Exception as e:
+            Domoticz.Error(f"Error exchanging code for tokens: {e}")
+            return None
+    
+    def make_authenticated_request(self, access_token: str, params: dict):
+        """Make authenticated API call to Domoticz using OAuth access token"""
+        try:
+            api_endpoint = f"{self.domoticz_base_url}/json.htm"
+            
+            headers = {
+                'Authorization': f'Bearer {access_token}',
+                'Content-Type': 'application/json'
+            }
+            
+            response = self.session.get(
+                api_endpoint,
+                params=params,
+                headers=headers,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                Domoticz.Debug(f"Domoticz OAuth API call successful: {params.get('param', 'unknown')}")
+                return result
+            elif response.status_code == 401:
+                return {"error": "OAuth token expired or invalid", "status_code": 401}
+            else:
+                return {"error": f"Domoticz API call failed: {response.status_code}"}
+                
+        except Exception as e:
+            return {"error": f"Domoticz OAuth API call error: {str(e)}"}
+
 class DomoticzMCPServer:
     """
-    Embedded Domoticz MCP Server - MCP Protocol Compliant
-    A Model Context Protocol server that provides secure access to Domoticz home automation APIs.
+    Domoticz MCP Server - MCP Protocol 2025-06-18 Compliant
+    Acts as OAuth client to Domoticz, provides MCP protocol interface
     """
     
-    def __init__(self, host: str = "0.0.0.0", port: int = 8765):
-        """Initialize the Domoticz MCP Server with full protocol compliance"""
+    def __init__(self, host: str = "0.0.0.0", port: int = 8765, 
+                 domoticz_oauth_client: DomoticzOAuthClient = None):
+        """Initialize the Domoticz MCP Server with MCP 2025-06-18 compliance"""
         self.host = host
         self.port = port
         self.app = None
         self.runner = None
+        self.domoticz_oauth_client = domoticz_oauth_client
         
         if AIOHTTP_AVAILABLE:
             self.app = web.Application()
@@ -129,7 +258,7 @@ class DomoticzMCPServer:
             Domoticz.Error(f"Error setting up CORS: {e}")
     
     def setup_routes(self):
-        """Setup HTTP routes for MCP protocol"""
+        """Setup HTTP routes for MCP protocol 2025-06-18"""
         if not AIOHTTP_AVAILABLE:
             return
             
@@ -140,6 +269,7 @@ class DomoticzMCPServer:
             # Health and info endpoints
             self.app.router.add_get('/health', self.health_check)
             self.app.router.add_get('/info', self.server_info)
+            
         except Exception as e:
             Domoticz.Error(f"Error setting up routes: {e}")
     
@@ -151,73 +281,47 @@ class DomoticzMCPServer:
         """Server info endpoint"""
         info = {
             "service": "Domoticz MCP Server",
-            "version": "3.3.0",
-            "protocol": "MCP 2024-11-05",
+            "version": "2.0.0",
+            "protocol": "MCP 2025-06-18",
             "mcp_sdk_available": MCP_SDK_AVAILABLE,
             "aiohttp_available": AIOHTTP_AVAILABLE,
             "capabilities": {
                 "tools": True,
-                "logging": True,
-                "dynamic_discovery": True
+                "logging": True
             },
-            "authentication_model": "http_basic_auth_with_domoticz_credentials",
-            "description": "MCP 2024-11-05 compliant server for Domoticz home automation with HTTP Basic Authentication"
+            "authentication_model": "oauth_2_1_passthrough",
+            "description": "MCP 2025-06-18 compliant server for Domoticz with OAuth passthrough authentication"
         }
         return web.json_response(info)
 
     async def handle_mcp_request(self, request: web_request.Request) -> web_response.Response:
-        """Handle all MCP protocol requests with full compliance and authentication"""
+        """Handle all MCP protocol requests - MCP 2025-06-18 compliant"""
         try:
-            # Check for HTTP Basic Authentication
-            auth_header = request.headers.get('Authorization')
-            if not auth_header or not auth_header.startswith('Basic '):
-                return web.json_response(
-                    {"error": "Authentication required. Use HTTP Basic Auth with your Domoticz credentials."},
-                    status=401,
-                    headers={'WWW-Authenticate': 'Basic realm="Domoticz MCP Server"'}
-                )
-            
-            # Parse Basic Auth credentials
-            try:
-                auth_data = auth_header[6:]  # Remove 'Basic ' prefix
-                decoded = base64.b64decode(auth_data).decode('utf-8')
-                username, password = decoded.split(':', 1)
-            except (ValueError, UnicodeDecodeError):
-                return web.json_response(
-                    {"error": "Invalid authentication format"},
-                    status=401,
-                    headers={'WWW-Authenticate': 'Basic realm="Domoticz MCP Server"'}
-                )
-            
-            # Store credentials in request for tool execution
-            request['domoticz_username'] = username
-            request['domoticz_password'] = password
-            
             data = await request.json()
             method = data.get('method')
             params = data.get('params', {})
             request_id = data.get('id')
             
-            Domoticz.Debug(f"MCP request: {method} from user: {username}")
+            Domoticz.Debug(f"MCP request: {method}")
             
-            # Handle initialization - Use exact MCP 2024-11-05 specification
+            # Handle initialization - MCP 2025-06-18 specification
             if method == 'initialize':
                 response = {
                     "jsonrpc": "2.0",
                     "id": request_id,
                     "result": {
-                        "protocolVersion": "2024-11-05",
+                        "protocolVersion": "2025-06-18",
                         "capabilities": {
                             "tools": {}
                         },
                         "serverInfo": {
                             "name": "domoticz-mcp-server",
-                            "version": "3.3.0"
+                            "version": "2.0.0"
                         }
                     }
                 }
             
-            # Handle tools/list - Return clean tool schemas without internal parameters
+            # Handle tools/list
             elif method == 'tools/list':
                 tools = await self.get_available_tools()
                 response = {
@@ -228,28 +332,41 @@ class DomoticzMCPServer:
                     }
                 }
                 
-            # Handle tools/call
+            # Handle tools/call - requires OAuth token
             elif method == 'tools/call':
                 tool_name = params.get('name')
                 arguments = params.get('arguments', {})
                 
-                # Pass request object to get credentials
-                result = await self.execute_domoticz_tool(tool_name, arguments, request)
-                
-                response = {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "result": {
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": json.dumps(result, indent=2)
-                            }
-                        ]
+                # Extract OAuth token from arguments (passed by MCP client)
+                access_token = arguments.get('access_token')
+                if not access_token:
+                    response = {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {
+                            "code": -32602,
+                            "message": "access_token required in arguments for authenticated calls"
+                        }
                     }
-                }
+                else:
+                    # Remove access_token from arguments before tool execution
+                    tool_arguments = {k: v for k, v in arguments.items() if k != 'access_token'}
+                    result = await self.execute_domoticz_tool(tool_name, tool_arguments, access_token)
+                    
+                    response = {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": json.dumps(result, indent=2)
+                                }
+                            ]
+                        }
+                    }
                 
-            # Handle logging/setLevel (optional MCP feature)
+            # Handle logging/setLevel
             elif method == 'logging/setLevel':
                 level = params.get('level', 'info')
                 Domoticz.Log(f"Log level set to: {level}")
@@ -285,15 +402,20 @@ class DomoticzMCPServer:
             return web.json_response(error_response, status=500)
 
     async def get_available_tools(self) -> List[Dict[str, Any]]:
-        """Get all available MCP tools with clean schemas - read-only only"""
+        """Get all available MCP tools - read-only Domoticz operations"""
         return [
             {
                 "name": "domoticz_get_version",
                 "description": "Get Domoticz version information",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {},
-                    "required": [],
+                    "properties": {
+                        "access_token": {
+                            "type": "string",
+                            "description": "OAuth access token for Domoticz authentication"
+                        }
+                    },
+                    "required": ["access_token"],
                     "additionalProperties": False
                 }
             },
@@ -303,6 +425,10 @@ class DomoticzMCPServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "access_token": {
+                            "type": "string",
+                            "description": "OAuth access token for Domoticz authentication"
+                        },
                         "filter": {
                             "type": "string",
                             "enum": ["all", "light", "weather", "temperature", "utility"],
@@ -315,7 +441,7 @@ class DomoticzMCPServer:
                             "description": "Only show devices that are in use"
                         }
                     },
-                    "required": [],
+                    "required": ["access_token"],
                     "additionalProperties": False
                 }
             },
@@ -325,13 +451,17 @@ class DomoticzMCPServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "access_token": {
+                            "type": "string",
+                            "description": "OAuth access token for Domoticz authentication"
+                        },
                         "idx": {
                             "type": "integer",
                             "description": "Device index",
                             "minimum": 1
                         }
                     },
-                    "required": ["idx"],
+                    "required": ["access_token", "idx"],
                     "additionalProperties": False
                 }
             },
@@ -340,8 +470,13 @@ class DomoticzMCPServer:
                 "description": "List all scenes and groups",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {},
-                    "required": [],
+                    "properties": {
+                        "access_token": {
+                            "type": "string",
+                            "description": "OAuth access token for Domoticz authentication"
+                        }
+                    },
+                    "required": ["access_token"],
                     "additionalProperties": False
                 }
             },
@@ -351,6 +486,10 @@ class DomoticzMCPServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "access_token": {
+                            "type": "string",
+                            "description": "OAuth access token for Domoticz authentication"
+                        },
                         "log_type": {
                             "type": "string",
                             "enum": ["status", "error", "notification"],
@@ -358,33 +497,25 @@ class DomoticzMCPServer:
                             "description": "Type of log to retrieve"
                         }
                     },
-                    "required": [],
+                    "required": ["access_token"],
                     "additionalProperties": False
                 }
             }
         ]
 
-    async def execute_domoticz_tool(self, name: str, arguments: Dict[str, Any], request: web_request.Request = None) -> Dict[str, Any]:
-        """Execute a Domoticz read-only tool with the given arguments"""
+    async def execute_domoticz_tool(self, name: str, arguments: Dict[str, Any], access_token: str) -> Dict[str, Any]:
+        """Execute a Domoticz tool using OAuth access token"""
         try:
             Domoticz.Debug(f"Executing tool: {name}")
 
-            if request:
-                domoticz_username = request.get('domoticz_username', '')
-                domoticz_password = request.get('domoticz_password', '')
-            else:
-                domoticz_username = ''
-                domoticz_password = ''
+            if not self.domoticz_oauth_client:
+                return {"error": "Domoticz OAuth client not configured"}
 
-            domoticz_url = "http://127.0.0.1:8080/json.htm"
-            plugin_instance = _plugin
-            if plugin_instance.default_domoticz_url:
-                domoticz_url = plugin_instance.default_domoticz_url
-
-            # Tool execution
+            # Tool execution using OAuth access token
             if name == "domoticz_get_version":
-                return self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
-                                              {"type": "command", "param": "getversion"})
+                return self.domoticz_oauth_client.make_authenticated_request(
+                    access_token, {"type": "command", "param": "getversion"}
+                )
 
             elif name == "domoticz_list_devices":
                 filter_type = arguments.get("filter", "all")
@@ -392,23 +523,26 @@ class DomoticzMCPServer:
                 params = {"type": "command", "param": "getdevices", "filter": filter_type}
                 if used:
                     params["used"] = "true"
-                return self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password, params)
+                return self.domoticz_oauth_client.make_authenticated_request(access_token, params)
 
             elif name == "domoticz_device_status":
                 idx = arguments.get("idx")
                 if not idx:
                     return {"error": "idx parameter is required"}
-                return self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
-                                              {"type": "command", "param": "getdevices", "rid": str(idx)})
+                return self.domoticz_oauth_client.make_authenticated_request(
+                    access_token, {"type": "command", "param": "getdevices", "rid": str(idx)}
+                )
 
             elif name == "domoticz_list_scenes":
-                return self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
-                                              {"type": "command", "param": "getscenes"})
+                return self.domoticz_oauth_client.make_authenticated_request(
+                    access_token, {"type": "command", "param": "getscenes"}
+                )
 
             elif name == "domoticz_get_log":
                 log_type = arguments.get("log_type", "status")
-                return self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
-                                              {"type": "command", "param": "getlog", "log": log_type})
+                return self.domoticz_oauth_client.make_authenticated_request(
+                    access_token, {"type": "command", "param": "getlog", "log": log_type}
+                )
 
             else:
                 return {"error": f"Unknown tool: {name}"}
@@ -416,56 +550,6 @@ class DomoticzMCPServer:
         except Exception as e:
             Domoticz.Error(f"Tool execution failed: {e}")
             return {"error": f"Tool execution failed: {str(e)}"}
-
-    def domoticz_api_call(self, domoticz_url: str, username: str, password: str, params: dict):
-        """Call Domoticz JSON API directly with provided credentials"""
-        try:
-            # Use the proven cookie-based authentication method
-            if username and password:
-                # Create session and login
-                requests_session = requests.Session()
-                
-                login_url = domoticz_url
-                login_params = {"type": "command", "param": "logincheck"}
-                
-                username_b64 = base64.b64encode(username.encode('utf-8')).decode('utf-8')
-                password_md5 = hashlib.md5(password.encode('utf-8')).hexdigest()
-                
-                login_data = {
-                    'username': username_b64,
-                    'password': password_md5,
-                    'rememberme': 'false'
-                }
-                
-                login_resp = requests_session.post(login_url, params=login_params, data=login_data, timeout=10)
-                
-                if login_resp.status_code == 200:
-                    login_result = login_resp.json()
-                    if login_result.get('status') == 'OK':
-                        # Now make the actual API call
-                        resp = requests_session.get(domoticz_url, params=params, timeout=10)
-                        
-                        if resp.status_code == 200:
-                            api_result = resp.json()
-                            return api_result
-                        else:
-                            return {"error": f"API call failed: {resp.status_code}"}
-                    else:
-                        return {"error": f"Login failed: {login_result}"}
-                else:
-                    return {"error": f"Login request failed: {login_resp.status_code}"}
-            else:
-                # No authentication - try direct call
-                resp = requests.get(domoticz_url, params=params, timeout=10)
-                resp.raise_for_status()
-                return resp.json()
-            
-        except requests.exceptions.Timeout:
-            return {"error": "Request timeout - check if Domoticz server is reachable"}
-        except requests.exceptions.ConnectionError:
-            return {"error": "Connection error - check Domoticz URL and network"}
-        except Exception as e:
-            return {"error": str(e)}
 
     async def start_server(self):
         """Start the HTTP server"""
@@ -479,12 +563,12 @@ class DomoticzMCPServer:
         site = web.TCPSite(runner, self.host, self.port)
         await site.start()
         
-        Domoticz.Log(f"Domoticz MCP Server v3.3.0 started on http://{self.host}:{self.port}")
+        Domoticz.Log(f"Domoticz MCP Server v2.0.0 started on http://{self.host}:{self.port}")
         Domoticz.Log(f"Health check: http://{self.host}:{self.port}/health")
         Domoticz.Log(f"Server info: http://{self.host}:{self.port}/info")
         Domoticz.Log(f"MCP endpoint: http://{self.host}:{self.port}/mcp")
-        Domoticz.Log(f"Protocol: MCP 2024-11-05 compliant")
-        Domoticz.Log(f"Authentication: HTTP Basic Auth with Domoticz credentials")
+        Domoticz.Log(f"Protocol: MCP 2025-06-18 compliant")
+        Domoticz.Log(f"Authentication: OAuth 2.1 passthrough to Domoticz")
         
         return runner
 
@@ -507,6 +591,7 @@ class BasePlugin:
         self.server_start_time = None
         self.restart_attempts = 0
         self.max_restart_attempts = 3
+        self.domoticz_oauth_client = None
         
         # Optional Domoticz URL override
         self.default_domoticz_url = ""
@@ -529,6 +614,16 @@ class BasePlugin:
             Domoticz.Log(f"Domoticz URL override: {self.default_domoticz_url}")
         else:
             Domoticz.Log("Using default Domoticz URL: localhost:8080")
+        
+        # Set up Domoticz OAuth client
+        domoticz_base_url = self.default_domoticz_url if self.default_domoticz_url else "http://127.0.0.1:8080"
+        self.domoticz_oauth_client = DomoticzOAuthClient(domoticz_base_url)
+        
+        # Try to discover OAuth endpoints
+        if self.domoticz_oauth_client.discover_oauth_endpoints():
+            Domoticz.Log("Domoticz OAuth endpoints discovered successfully")
+        else:
+            Domoticz.Error("Failed to discover Domoticz OAuth endpoints - OAuth features may not work")
         
         # Set Debugging
         Domoticz.Debugging(int(Parameters["Mode6"]))
@@ -631,8 +726,12 @@ class BasePlugin:
             asyncio.set_event_loop(self.event_loop)
             Domoticz.Log("DIAGNOSTIC: Event loop created")
             
-            # Create and start MCP server
-            self.mcp_server = DomoticzMCPServer(host=self.host, port=self.port)
+            # Create and start MCP server with Domoticz OAuth client
+            self.mcp_server = DomoticzMCPServer(
+                host=self.host, 
+                port=self.port, 
+                domoticz_oauth_client=self.domoticz_oauth_client
+            )
             Domoticz.Log(f"DIAGNOSTIC: MCP server instance created for {self.host}:{self.port}")
             
             # Run the server
@@ -726,30 +825,25 @@ class BasePlugin:
             health_host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
             health_url = f"http://{health_host}:{self.port}/health"
             
-            # Enhanced debugging
-            Domoticz.Log(f"DIAGNOSTIC: Health check - Original host: {self.host}")
-            Domoticz.Log(f"DIAGNOSTIC: Health check - Resolved host: {health_host}")
-            Domoticz.Log(f"DIAGNOSTIC: Health check - Full URL: {health_url}")
-            
             response = requests.get(health_url, timeout=3)
             
             if response.status_code == 200:
                 data = response.json()
                 is_healthy = data.get("status") == "healthy"
-                Domoticz.Log(f"DIAGNOSTIC: Health check SUCCESS - Response: {data}")
+                Domoticz.Debug(f"Health check SUCCESS - Response: {data}")
                 return is_healthy
             else:
-                Domoticz.Log(f"DIAGNOSTIC: Health check FAILED - Status code: {response.status_code}")
+                Domoticz.Debug(f"Health check FAILED - Status code: {response.status_code}")
                 return False
                 
         except requests.exceptions.ConnectionError as e:
-            Domoticz.Log(f"DIAGNOSTIC: Health check CONNECTION ERROR: {str(e)}")
+            Domoticz.Debug(f"Health check CONNECTION ERROR: {str(e)}")
             return False
         except requests.exceptions.Timeout as e:
-            Domoticz.Log(f"DIAGNOSTIC: Health check TIMEOUT: {str(e)}")
+            Domoticz.Debug(f"Health check TIMEOUT: {str(e)}")
             return False
         except Exception as e:
-            Domoticz.Log(f"DIAGNOSTIC: Health check UNEXPECTED ERROR: {str(e)}")
+            Domoticz.Debug(f"Health check UNEXPECTED ERROR: {str(e)}")
             return False
 
     def _get_server_info(self):
@@ -789,7 +883,10 @@ class BasePlugin:
                     "mcp_sdk_available": MCP_SDK_AVAILABLE,
                     "uptime": int(time.time() - self.server_start_time) if self.server_start_time else 0,
                     "last_check": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "restart_attempts": self.restart_attempts
+                    "restart_attempts": self.restart_attempts,
+                    "protocol_version": "MCP 2025-06-18",
+                    "authentication": "OAuth 2.1 passthrough",
+                    "domoticz_oauth_configured": self.domoticz_oauth_client.oauth_config is not None
                 }
                 
                 # Get additional server info if available
