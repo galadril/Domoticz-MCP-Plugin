@@ -288,16 +288,6 @@ class DomoticzMCPServer:
         """Get all available MCP tools with clean schemas - NO authentication parameters"""
         return [
             {
-                "name": "domoticz_get_status",
-                "description": "Get Domoticz system status information",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": False
-                }
-            },
-            {
                 "name": "domoticz_get_version",
                 "description": "Get Domoticz version information",
                 "inputSchema": {
@@ -497,7 +487,6 @@ class DomoticzMCPServer:
             
             # Map tool names to legacy names for backward compatibility
             tool_mapping = {
-                "domoticz_get_status": "get_status",
                 "domoticz_get_version": "get_version", 
                 "domoticz_list_devices": "list_devices",
                 "domoticz_device_status": "device_status",
@@ -513,11 +502,7 @@ class DomoticzMCPServer:
             actual_tool_name = tool_mapping.get(name, name)
             
             # Execute the appropriate tool
-            if actual_tool_name == "get_status":
-                result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password, 
-                                              {"type":"command","param":"status"})
-                
-            elif actual_tool_name == "get_version":
+            if actual_tool_name == "get_version":
                 result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
                                               {"type":"command","param":"getversion"})
                 
