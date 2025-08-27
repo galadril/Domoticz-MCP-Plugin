@@ -108,6 +108,20 @@ class DomoticzOAuthClient:
             
             if response.status_code == 200:
                 self.oauth_config = response.json()
+                
+                # Fix hostname issues - replace domoticz.local with actual IP
+                base_url_parts = urllib.parse.urlparse(self.domoticz_base_url)
+                actual_host = base_url_parts.netloc
+                
+                # Update endpoints to use actual host instead of domoticz.local
+                for key in ['authorization_endpoint', 'token_endpoint', 'issuer']:
+                    if key in self.oauth_config:
+                        endpoint_url = self.oauth_config[key]
+                        if 'domoticz.local' in endpoint_url:
+                            # Replace domoticz.local with actual host
+                            self.oauth_config[key] = endpoint_url.replace('domoticz.local:8080', actual_host)
+                            Domoticz.Debug(f"Fixed endpoint {key}: {self.oauth_config[key]}")
+                
                 Domoticz.Log(f"Discovered Domoticz OAuth endpoints: {well_known_url}")
                 return True
             else:
@@ -332,26 +346,26 @@ class DomoticzMCPServer:
                     }
                 }
                 
-            # Handle tools/call - requires OAuth token
+            # Handle tools/call - requires OAuth authentication
             elif method == 'tools/call':
                 tool_name = params.get('name')
                 arguments = params.get('arguments', {})
                 
-                # Extract OAuth token from arguments (passed by MCP client)
-                access_token = arguments.get('access_token')
-                if not access_token:
+                # Check for Authorization header (MCP client authentication)
+                auth_header = request.headers.get('Authorization')
+                if not auth_header or not auth_header.startswith('Bearer '):
                     response = {
                         "jsonrpc": "2.0",
                         "id": request_id,
                         "error": {
                             "code": -32602,
-                            "message": "access_token required in arguments for authenticated calls"
+                            "message": "Bearer token required in Authorization header"
                         }
                     }
                 else:
-                    # Remove access_token from arguments before tool execution
-                    tool_arguments = {k: v for k, v in arguments.items() if k != 'access_token'}
-                    result = await self.execute_domoticz_tool(tool_name, tool_arguments, access_token)
+                    # Extract token from Authorization header
+                    access_token = auth_header[7:]  # Remove 'Bearer ' prefix
+                    result = await self.execute_domoticz_tool(tool_name, arguments, access_token)
                     
                     response = {
                         "jsonrpc": "2.0",
@@ -409,13 +423,8 @@ class DomoticzMCPServer:
                 "description": "Get Domoticz version information",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {
-                        "access_token": {
-                            "type": "string",
-                            "description": "OAuth access token for Domoticz authentication"
-                        }
-                    },
-                    "required": ["access_token"],
+                    "properties": {},
+                    "required": [],
                     "additionalProperties": False
                 }
             },
@@ -425,10 +434,6 @@ class DomoticzMCPServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "access_token": {
-                            "type": "string",
-                            "description": "OAuth access token for Domoticz authentication"
-                        },
                         "filter": {
                             "type": "string",
                             "enum": ["all", "light", "weather", "temperature", "utility"],
@@ -441,7 +446,7 @@ class DomoticzMCPServer:
                             "description": "Only show devices that are in use"
                         }
                     },
-                    "required": ["access_token"],
+                    "required": [],
                     "additionalProperties": False
                 }
             },
@@ -451,17 +456,13 @@ class DomoticzMCPServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "access_token": {
-                            "type": "string",
-                            "description": "OAuth access token for Domoticz authentication"
-                        },
                         "idx": {
                             "type": "integer",
                             "description": "Device index",
                             "minimum": 1
                         }
                     },
-                    "required": ["access_token", "idx"],
+                    "required": ["idx"],
                     "additionalProperties": False
                 }
             },
@@ -470,13 +471,8 @@ class DomoticzMCPServer:
                 "description": "List all scenes and groups",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {
-                        "access_token": {
-                            "type": "string",
-                            "description": "OAuth access token for Domoticz authentication"
-                        }
-                    },
-                    "required": ["access_token"],
+                    "properties": {},
+                    "required": [],
                     "additionalProperties": False
                 }
             },
@@ -486,10 +482,6 @@ class DomoticzMCPServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "access_token": {
-                            "type": "string",
-                            "description": "OAuth access token for Domoticz authentication"
-                        },
                         "log_type": {
                             "type": "string",
                             "enum": ["status", "error", "notification"],
@@ -497,7 +489,7 @@ class DomoticzMCPServer:
                             "description": "Type of log to retrieve"
                         }
                     },
-                    "required": ["access_token"],
+                    "required": [],
                     "additionalProperties": False
                 }
             }
