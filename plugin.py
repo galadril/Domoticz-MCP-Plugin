@@ -336,109 +336,12 @@ class DomoticzMCPServer:
                 }
             },
             {
-                "name": "domoticz_switch_device",
-                "description": "Control device switching (on/off/toggle) and dimmer levels",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "idx": {
-                            "type": "integer", 
-                            "description": "Device index",
-                            "minimum": 1
-                        },
-                        "command": {
-                            "type": "string", 
-                            "enum": ["On", "Off", "Toggle", "Set Level"], 
-                            "description": "Switch command"
-                        },
-                        "level": {
-                            "type": "integer", 
-                            "minimum": 0, 
-                            "maximum": 100, 
-                            "description": "Dimmer level (0-100, only required for Set Level command)"
-                        }
-                    },
-                    "required": ["idx", "command"],
-                    "additionalProperties": False
-                }
-            },
-            {
                 "name": "domoticz_list_scenes",
                 "description": "List all scenes and groups",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
                     "required": [],
-                    "additionalProperties": False
-                }
-            },
-            {
-                "name": "domoticz_run_scene",
-                "description": "Execute a scene or group",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "idx": {
-                            "type": "integer", 
-                            "description": "Scene index",
-                            "minimum": 1
-                        },
-                        "action": {
-                            "type": "string", 
-                            "enum": ["On", "Off"], 
-                            "default": "On",
-                            "description": "Scene action"
-                        }
-                    },
-                    "required": ["idx"],
-                    "additionalProperties": False
-                }
-            },
-            {
-                "name": "domoticz_set_thermostat",
-                "description": "Set thermostat setpoint",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "idx": {
-                            "type": "integer", 
-                            "description": "Thermostat device index",
-                            "minimum": 1
-                        },
-                        "setpoint": {
-                            "type": "number", 
-                            "description": "Temperature setpoint"
-                        }
-                    },
-                    "required": ["idx", "setpoint"],
-                    "additionalProperties": False
-                }
-            },
-            {
-                "name": "domoticz_send_notification",
-                "description": "Send notification through Domoticz",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "subject": {
-                            "type": "string", 
-                            "description": "Notification subject",
-                            "minLength": 1
-                        },
-                        "message": {
-                            "type": "string", 
-                            "description": "Notification message",
-                            "minLength": 1
-                        },
-                        "priority": {
-                            "type": "integer", 
-                            "minimum": 0, 
-                            "maximum": 4, 
-                            "default": 0,
-                            "description": "Notification priority level"
-                        }
-                    },
-                    "required": ["subject", "message"],
                     "additionalProperties": False
                 }
             },
@@ -490,11 +393,7 @@ class DomoticzMCPServer:
                 "domoticz_get_version": "get_version", 
                 "domoticz_list_devices": "list_devices",
                 "domoticz_device_status": "device_status",
-                "domoticz_switch_device": "switch_device",
                 "domoticz_list_scenes": "list_scenes",
-                "domoticz_run_scene": "run_scene",
-                "domoticz_set_thermostat": "set_thermostat",
-                "domoticz_send_notification": "send_notification",
                 "domoticz_get_log": "get_log"
             }
             
@@ -521,50 +420,9 @@ class DomoticzMCPServer:
                 result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
                                               {"type":"command","param":"getdevices","rid":str(idx)})
                 
-            elif actual_tool_name == "switch_device":
-                idx = arguments.get("idx")
-                command = arguments.get("command")
-                level = arguments.get("level")
-                if not idx or not command:
-                    return {"error": "idx and command parameters are required"}
-                params = {"type":"command","param":"switchlight","idx":idx,"switchcmd":command}
-                if level is not None:
-                    params["level"] = level
-                result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password, params)
-                
             elif actual_tool_name == "list_scenes":
                 result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
                                               {"type":"command","param":"getscenes"})
-                
-            elif actual_tool_name == "run_scene":
-                idx = arguments.get("idx")
-                action = arguments.get("action", "On")
-                if not idx:
-                    return {"error": "idx parameter is required"}
-                result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
-                                              {"type":"command","param":"switchscene","idx":idx,"switchcmd":action})
-                
-            elif actual_tool_name == "set_thermostat":
-                idx = arguments.get("idx")
-                setpoint = arguments.get("setpoint")
-                if not idx or setpoint is None:
-                    return {"error": "idx and setpoint parameters are required"}
-                result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
-                                              {"type":"command","param":"setsetpoint","idx":idx,"setpoint":setpoint})
-                
-            elif actual_tool_name == "send_notification":
-                subject = arguments.get("subject")
-                message = arguments.get("message")
-                priority = arguments.get("priority", 0)
-                if not subject or not message:
-                    return {"error": "subject and message parameters are required"}
-                result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password, {
-                    "type": "command",
-                    "param": "sendnotification",
-                    "subject": subject,
-                    "body": message,
-                    "priority": priority
-                })
                 
             elif actual_tool_name == "get_log":
                 log_type = arguments.get("log_type", "status")
