@@ -285,7 +285,7 @@ class DomoticzMCPServer:
             return web.json_response(error_response, status=500)
 
     async def get_available_tools(self) -> List[Dict[str, Any]]:
-        """Get all available MCP tools with clean schemas - NO authentication parameters"""
+        """Get all available MCP tools with clean schemas - read-only only"""
         return [
             {
                 "name": "domoticz_get_version",
@@ -304,13 +304,13 @@ class DomoticzMCPServer:
                     "type": "object",
                     "properties": {
                         "filter": {
-                            "type": "string", 
-                            "enum": ["all", "light", "weather", "temperature", "utility"], 
+                            "type": "string",
+                            "enum": ["all", "light", "weather", "temperature", "utility"],
                             "default": "all",
                             "description": "Filter devices by type"
                         },
                         "used": {
-                            "type": "boolean", 
+                            "type": "boolean",
                             "default": True,
                             "description": "Only show devices that are in use"
                         }
@@ -326,7 +326,7 @@ class DomoticzMCPServer:
                     "type": "object",
                     "properties": {
                         "idx": {
-                            "type": "integer", 
+                            "type": "integer",
                             "description": "Device index",
                             "minimum": 1
                         }
@@ -352,8 +352,8 @@ class DomoticzMCPServer:
                     "type": "object",
                     "properties": {
                         "log_type": {
-                            "type": "string", 
-                            "enum": ["status", "error", "notification"], 
+                            "type": "string",
+                            "enum": ["status", "error", "notification"],
                             "default": "status",
                             "description": "Type of log to retrieve"
                         }
@@ -365,75 +365,54 @@ class DomoticzMCPServer:
         ]
 
     async def execute_domoticz_tool(self, name: str, arguments: Dict[str, Any], request: web_request.Request = None) -> Dict[str, Any]:
-        """Execute a Domoticz tool with the given arguments"""
+        """Execute a Domoticz read-only tool with the given arguments"""
         try:
             Domoticz.Debug(f"Executing tool: {name}")
-            
-            # Get credentials from authenticated request
+
             if request:
                 domoticz_username = request.get('domoticz_username', '')
                 domoticz_password = request.get('domoticz_password', '')
             else:
                 domoticz_username = ''
                 domoticz_password = ''
-            
-            # Default to localhost:8080 for Domoticz URL (same host as MCP server)
+
             domoticz_url = "http://127.0.0.1:8080/json.htm"
-            
-            # Allow override from plugin configuration if set
             plugin_instance = _plugin
             if plugin_instance.default_domoticz_url:
                 domoticz_url = plugin_instance.default_domoticz_url
-            
-            Domoticz.Debug(f"Using Domoticz URL: {domoticz_url}")
-            Domoticz.Debug(f"Authenticated user: {domoticz_username}")
-            
-            # Map tool names to legacy names for backward compatibility
-            tool_mapping = {
-                "domoticz_get_version": "get_version", 
-                "domoticz_list_devices": "list_devices",
-                "domoticz_device_status": "device_status",
-                "domoticz_list_scenes": "list_scenes",
-                "domoticz_get_log": "get_log"
-            }
-            
-            # Get actual tool name (support both new prefixed and legacy names)
-            actual_tool_name = tool_mapping.get(name, name)
-            
-            # Execute the appropriate tool
-            if actual_tool_name == "get_version":
-                result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
-                                              {"type":"command","param":"getversion"})
-                
-            elif actual_tool_name == "list_devices":
+
+            # Tool execution
+            if name == "domoticz_get_version":
+                return self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
+                                              {"type": "command", "param": "getversion"})
+
+            elif name == "domoticz_list_devices":
                 filter_type = arguments.get("filter", "all")
                 used = arguments.get("used", True)
-                params = {"type":"command","param":"getdevices","filter":filter_type}
+                params = {"type": "command", "param": "getdevices", "filter": filter_type}
                 if used:
                     params["used"] = "true"
-                result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password, params)
-                
-            elif actual_tool_name == "device_status":
+                return self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password, params)
+
+            elif name == "domoticz_device_status":
                 idx = arguments.get("idx")
                 if not idx:
                     return {"error": "idx parameter is required"}
-                result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
-                                              {"type":"command","param":"getdevices","rid":str(idx)})
-                
-            elif actual_tool_name == "list_scenes":
-                result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
-                                              {"type":"command","param":"getscenes"})
-                
-            elif actual_tool_name == "get_log":
+                return self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
+                                              {"type": "command", "param": "getdevices", "rid": str(idx)})
+
+            elif name == "domoticz_list_scenes":
+                return self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
+                                              {"type": "command", "param": "getscenes"})
+
+            elif name == "domoticz_get_log":
                 log_type = arguments.get("log_type", "status")
-                result = self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
-                                              {"type":"command","param":"getlog","log":log_type})
-                
+                return self.domoticz_api_call(domoticz_url, domoticz_username, domoticz_password,
+                                              {"type": "command", "param": "getlog", "log": log_type})
+
             else:
-                result = {"error": f"Unknown tool: {name}"}
-                
-            return result
-            
+                return {"error": f"Unknown tool: {name}"}
+
         except Exception as e:
             Domoticz.Error(f"Tool execution failed: {e}")
             return {"error": f"Tool execution failed: {str(e)}"}
