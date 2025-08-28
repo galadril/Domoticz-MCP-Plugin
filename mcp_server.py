@@ -42,10 +42,30 @@ class DomoticzMCPServer:
         # Redirect bridge (minimal implementation) to cope with Domoticz HTTPS-only redirect requirement.
         # Env vars:
         #   MCP_REDIRECT_BRIDGE=1 (default) enable feature
-        #   MCP_BRIDGE_BASE_HTTPS (required) e.g. https://rpi.local or https://rpi.local:9443
+        #   MCP_BRIDGE_BASE_HTTPS (optional) e.g. https://rpi.local or https://rpi.local:9443
+        #   MCP_BRIDGE_HTTPS_PORT (optional) when deriving base; default 443
+        # If MCP_BRIDGE_BASE_HTTPS not provided we try to derive an HTTPS base automatically from the Domoticz base host.
         # You must front the plugin with a reverse proxy providing HTTPS on that base and forwarding to this HTTP server.
         self.redirect_bridge_enabled = os.environ.get('MCP_REDIRECT_BRIDGE', '1') == '1'
         self.bridge_https_base = os.environ.get('MCP_BRIDGE_BASE_HTTPS')  # e.g. https://rpi.local
+        self.bridge_https_port = os.environ.get('MCP_BRIDGE_HTTPS_PORT')  # optional override port when deriving
+        # Attempt automatic derivation if enabled & not explicitly configured
+        if self.redirect_bridge_enabled and not self.bridge_https_base:
+            try:
+                # Prefer Domoticz base URL host, fallback to local host name
+                domo_host = None
+                if self.domoticz_oauth_client and getattr(self.domoticz_oauth_client, 'domoticz_base_url', None):
+                    p = urllib.parse.urlparse(self.domoticz_oauth_client.domoticz_base_url)
+                    domo_host = p.hostname
+                if not domo_host:
+                    domo_host = os.environ.get('HOSTNAME') or 'localhost'
+                port_part = ''
+                if self.bridge_https_port and self.bridge_https_port not in ('443', ''):
+                    port_part = f":{self.bridge_https_port}"
+                self.bridge_https_base = f"https://{domo_host}{port_part}"
+                Domoticz.Log(f"Derived HTTPS redirect bridge base: {self.bridge_https_base} (override with MCP_BRIDGE_BASE_HTTPS)")
+            except Exception as e:  # pragma: no cover
+                Domoticz.Error(f"Failed to derive HTTPS redirect bridge base automatically: {e}")
         self.redirect_bridge_map: Dict[str, Dict[str, Any]] = {}  # state -> {redirect, ts}
         self.redirect_bridge_ttl = 600  # seconds
         if AIOHTTP_AVAILABLE:
@@ -112,7 +132,7 @@ class DomoticzMCPServer:
                 return web.json_response({"error": "authorization_endpoint missing"}, status=500)
             qp = dict(request.rel_url.query)
             # Redirect bridge logic: Domoticz requires https:// redirect_uri; IDE supplies http://127.0.0.1:<port>
-            # If enabled and we have a bridge base, replace redirect_uri with HTTPS bridge endpoint and cache original.
+            # If enabled and we have (or derived) a bridge base, replace redirect_uri with HTTPS bridge endpoint and cache original.
             try:
                 orig_redirect = qp.get('redirect_uri')
                 if (self.redirect_bridge_enabled and self.bridge_https_base and orig_redirect and
@@ -124,6 +144,8 @@ class DomoticzMCPServer:
                     self.redirect_bridge_map[state] = {"redirect": orig_redirect, "ts": time.time()}
                     qp['redirect_uri'] = f"{self.bridge_https_base.rstrip('/')}/redirect_bridge"
                     Domoticz.Log(f"Redirect bridge engaged for state={state} -> {orig_redirect} via {qp['redirect_uri']}")
+                elif self.redirect_bridge_enabled and not self.bridge_https_base and orig_redirect:
+                    Domoticz.Error("Redirect bridge could not engage (no HTTPS base). Set MCP_BRIDGE_BASE_HTTPS or ensure auto-derivation worked.")
             except Exception as e:  # pragma: no cover
                 Domoticz.Error(f"Redirect bridge setup failed: {e}")
             if 'client_secret' in qp:
