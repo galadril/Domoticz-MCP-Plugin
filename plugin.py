@@ -102,30 +102,38 @@ class DomoticzOAuthClient:
         self.oauth_config = None
         self.client_id = ""
         self.client_secret = ""
+    
+    def _normalize_oauth_config_hosts(self):
+        """Ensure all discovered endpoints use the override host, not domoticz.local.*"""
+        if not self.oauth_config:
+            return
+        try:
+            target = urllib.parse.urlparse(self.domoticz_base_url)
+            target_netloc = target.netloc
+            for key in ['authorization_endpoint', 'token_endpoint', 'issuer']:
+                val = self.oauth_config.get(key)
+                if not val or '://' not in val:
+                    continue
+                parsed = urllib.parse.urlparse(val)
+                # If server advertises domoticz.local (with or without port) or hostname differs from override -> rewrite
+                if parsed.hostname and (parsed.hostname.startswith('domoticz.local') or parsed.netloc != target_netloc):
+                    new_url = urllib.parse.urlunparse((parsed.scheme, target_netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+                    if new_url != val:
+                        self.oauth_config[key] = new_url
+                        Domoticz.Debug(f"Normalized OAuth {key}: {new_url}")
+        except Exception as e:
+            Domoticz.Debug(f"OAuth host normalization skipped: {e}")
         
     def discover_oauth_endpoints(self):
         """Discover OAuth endpoints from Domoticz's .well-known configuration"""
         try:
-            # Try to get OAuth configuration from Domoticz
             well_known_url = f"{self.domoticz_base_url}/.well-known/openid-configuration"
             response = self.session.get(well_known_url, timeout=10)
             
             if response.status_code == 200:
                 self.oauth_config = response.json()
-                
-                # Fix hostname issues - replace domoticz.local with actual IP
-                base_url_parts = urllib.parse.urlparse(self.domoticz_base_url)
-                actual_host = base_url_parts.netloc
-                
-                # Update endpoints to use actual host instead of domoticz.local
-                for key in ['authorization_endpoint', 'token_endpoint', 'issuer']:
-                    if key in self.oauth_config:
-                        endpoint_url = self.oauth_config[key]
-                        if 'domoticz.local' in endpoint_url:
-                            # Replace domoticz.local with actual host
-                            self.oauth_config[key] = endpoint_url.replace('domoticz.local:8080', actual_host)
-                            Domoticz.Debug(f"Fixed endpoint {key}: {self.oauth_config[key]}")
-                
+                # Normalize hosts to override base URL host
+                self._normalize_oauth_config_hosts()
                 Domoticz.Log(f"Discovered Domoticz OAuth endpoints: {well_known_url}")
                 return True
             else:
@@ -315,15 +323,22 @@ class DomoticzMCPServer:
             "description": "MCP 2025-06-18 compliant server for Domoticz with OAuth passthrough authentication"
         }
         
-        # Fetch Domoticz OpenID Connect configuration using configured URL
         if self.domoticz_oauth_client:
-            try:
-                well_known_url = f"{self.domoticz_oauth_client.domoticz_base_url}/.well-known/openid-configuration"
-                response = requests.get(well_known_url, timeout=5)
-                if response.status_code == 200:
-                    info["authorization"] = response.json()
-            except Exception as e:
-                Domoticz.Log(f"Warning: Failed to fetch Domoticz OpenID Connect configuration: {e}")
+            # Prefer already discovered & normalized config
+            if self.domoticz_oauth_client.oauth_config:
+                info["authorization"] = self.domoticz_oauth_client.oauth_config
+            else:
+                try:
+                    well_known_url = f"{self.domoticz_oauth_client.domoticz_base_url}/.well-known/openid-configuration"
+                    response = requests.get(well_known_url, timeout=5)
+                    if response.status_code == 200:
+                        cfg = response.json()
+                        # Temporarily assign then normalize
+                        self.domoticz_oauth_client.oauth_config = cfg
+                        self.domoticz_oauth_client._normalize_oauth_config_hosts()
+                        info["authorization"] = self.domoticz_oauth_client.oauth_config
+                except Exception as e:
+                    Domoticz.Log(f"Warning: Failed to fetch Domoticz OpenID Connect configuration: {e}")
         
         return web.json_response(info)
 
