@@ -39,18 +39,14 @@ class DomoticzMCPServer:
         self.app = None
         self.runner = None
         self.domoticz_oauth_client = domoticz_oauth_client
-        # Redirect bridge (minimal implementation) to cope with Domoticz HTTPS-only redirect requirement.
-        # Env vars:
-        #   MCP_REDIRECT_BRIDGE=1 (default) enable feature
-        #   MCP_BRIDGE_BASE_HTTPS (optional) e.g. https://rpi.local or https://rpi.local:9443
-        #   MCP_BRIDGE_HTTPS_PORT (optional) when deriving base; default 443
-        #   MCP_LOG_AUTH_CODE=1 log full authorization code (security sensitive!)
-        #   MCP_BRIDGE_DEBUG_PAGE=1 show HTML page with code instead of silent 302
-        self.redirect_bridge_enabled = os.environ.get('MCP_REDIRECT_BRIDGE', '1') == '1'
-        self.bridge_https_base = os.environ.get('MCP_BRIDGE_BASE_HTTPS')  # e.g. https://rpi.local
-        self.bridge_https_port = os.environ.get('MCP_BRIDGE_HTTPS_PORT')  # optional override port when deriving
-        self.log_full_code = os.environ.get('MCP_LOG_AUTH_CODE') == '1'
-        self.debug_bridge_page = os.environ.get('MCP_BRIDGE_DEBUG_PAGE') == '1'
+        # Simplified redirect bridge: always enabled and always logs full authorization code.
+        # Removed environment variable configuration to reduce complexity.
+        # Bridge will derive HTTPS base automatically (still uses HOSTNAME env var if present for host discovery).
+        self.redirect_bridge_enabled = True
+        self.bridge_https_base = None  # optional explicit override removed (always derive if None)
+        self.bridge_https_port = None  # kept for derivation logic (unused unless set programmatically later)
+        self.log_full_code = True      # always log full code (security consideration: code appears in Domoticz log)
+        self.debug_bridge_page = False # can be toggled in code if manual inspection page desired
         # Attempt automatic derivation if enabled & not explicitly configured
         if self.redirect_bridge_enabled and not self.bridge_https_base:
             try:
@@ -65,7 +61,7 @@ class DomoticzMCPServer:
                 if self.bridge_https_port and self.bridge_https_port not in ('443', ''):
                     port_part = f":{self.bridge_https_port}"
                 self.bridge_https_base = f"https://{domo_host}{port_part}"
-                Domoticz.Log(f"Derived HTTPS redirect bridge base: {self.bridge_https_base} (override with MCP_BRIDGE_BASE_HTTPS)")
+                Domoticz.Log(f"Derived HTTPS redirect bridge base: {self.bridge_https_base}")
             except Exception as e:  # pragma: no cover
                 Domoticz.Error(f"Failed to derive HTTPS redirect bridge base automatically: {e}")
         self.redirect_bridge_map: Dict[str, Dict[str, Any]] = {}  # state -> {redirect, ts}
@@ -136,8 +132,7 @@ class DomoticzMCPServer:
             if not auth_ep:
                 return web.json_response({"error": "authorization_endpoint missing"}, status=500)
             qp = dict(request.rel_url.query)
-            # Redirect bridge logic: Domoticz requires https:// redirect_uri; IDE supplies http://127.0.0.1:<port>
-            # If enabled and we have (or derived) a bridge base, replace redirect_uri with HTTPS bridge endpoint and cache original.
+            # Always engage redirect bridge logic if loopback HTTP redirect is requested.
             try:
                 orig_redirect = qp.get('redirect_uri')
                 if (self.redirect_bridge_enabled and self.bridge_https_base and orig_redirect and
@@ -149,8 +144,6 @@ class DomoticzMCPServer:
                     self.redirect_bridge_map[state] = {"redirect": orig_redirect, "ts": time.time()}
                     qp['redirect_uri'] = f"{self.bridge_https_base.rstrip('/')}/redirect_bridge"
                     Domoticz.Log(f"Redirect bridge engaged for state={state} -> {orig_redirect} via {qp['redirect_uri']}")
-                elif self.redirect_bridge_enabled and not self.bridge_https_base and orig_redirect:
-                    Domoticz.Error("Redirect bridge could not engage (no HTTPS base). Set MCP_BRIDGE_BASE_HTTPS or ensure auto-derivation worked.")
             except Exception as e:  # pragma: no cover
                 Domoticz.Error(f"Redirect bridge setup failed: {e}")
             if 'client_secret' in qp:
@@ -176,16 +169,13 @@ class DomoticzMCPServer:
                 return web.Response(text="Redirect bridge state unknown or expired", status=400)
             entry = self.redirect_bridge_map.pop(state)
             orig = entry.get('redirect')
-            # Track code for later inspection
-            record = {"ts": time.time(), "state": state, "code": code if self.log_full_code else (code[:4] + "..." + code[-4:] if code and len(code) > 8 else code), "full_code_logged": self.log_full_code, "error": error, "forward_target": orig}
+            # Track code for later inspection (always full code stored/logged)
+            record = {"ts": time.time(), "state": state, "code": code, "full_code_logged": True, "error": error, "forward_target": orig}
             self.recent_auth_codes.append(record)
             if len(self.recent_auth_codes) > self.recent_codes_limit:
                 self.recent_auth_codes = self.recent_auth_codes[-self.recent_codes_limit:]
             if code:
-                if self.log_full_code:
-                    Domoticz.Log(f"OAuth authorization code captured state={state} code={code}")
-                else:
-                    Domoticz.Log(f"OAuth authorization code captured state={state} code(partial)={record['code']}")
+                Domoticz.Log(f"OAuth authorization code captured state={state} code={code}")
             if error:
                 Domoticz.Error(f"OAuth authorization error state={state} error={error}")
             # Safety: only allow loopback http
@@ -198,8 +188,6 @@ class DomoticzMCPServer:
                 forward += f"&state={urllib.parse.quote(state)}"
             Domoticz.Debug(f"Redirect bridge forwarding -> {forward}")
             if self.debug_bridge_page:
-                # Show an HTML page with manual copy option instead of auto redirect
-                # Use doubled braces to escape literal JS braces inside f-string
                 body = (f"<html><body><h3>Authorization Complete</h3>"
                         f"<p>State: {state}</p><p>Code: {code or error}</p>"
                         f"<p>Forward target: {forward}</p>"
@@ -215,7 +203,7 @@ class DomoticzMCPServer:
             return web.Response(text=f"Redirect bridge failure: {e}", status=500)
 
     async def last_auth_codes_handler(self, request: web_request.Request):
-        # Return recent (possibly redacted) auth codes for debugging
+        # Return recent auth codes (always full codes now)
         return web.json_response({"recent": self.recent_auth_codes})
 
     def _purge_redirect_bridge(self):
