@@ -283,3 +283,73 @@ class DomoticzMCPServer:
                 result = await self.execute_domoticz_tool(tool_name, arguments, access_token)
                 Domoticz.Debug(f"tools/call done name={tool_name} elapsed={time.time()-start:.3f}s")
                 resp = {"jsonrpc": "2.0", "id": request_id, "result": {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}}
+            elif method == 'logging/setLevel':
+                level = params.get('level', 'info')
+                Domoticz.Log(f"Log level set to: {level}")
+                resp = {"jsonrpc": "2.0", "id": request_id, "result": {}}
+            else:
+                Domoticz.Error(f"Unknown MCP method: {method}")
+                resp = {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": f"Method not found: {method}"}}
+            return web.json_response(resp)
+        except Exception as e:
+            Domoticz.Error(f"Error handling MCP request: {e}")
+            return web.json_response({"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": f"Internal error: {e}"}}, status=500)
+
+    # ---- tool handling ----------------------------------------------------
+    async def get_available_tools(self) -> List[Dict[str, Any]]:
+        return [
+            {"name": "domoticz_get_version", "description": "Get Domoticz version information", "inputSchema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False}},
+            {"name": "domoticz_list_devices", "description": "List all Domoticz devices with optional filtering", "inputSchema": {"type": "object", "properties": {"filter": {"type": "string", "enum": ["all", "light", "weather", "temperature", "utility"], "default": "all"}, "used": {"type": "boolean", "default": True}}, "required": [], "additionalProperties": False}},
+            {"name": "domoticz_device_status", "description": "Get detailed status of a specific device", "inputSchema": {"type": "object", "properties": {"idx": {"type": "integer", "minimum": 1}}, "required": ["idx"], "additionalProperties": False}},
+            {"name": "domoticz_list_scenes", "description": "List all scenes and groups", "inputSchema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False}},
+            {"name": "domoticz_get_log", "description": "Retrieve Domoticz logs", "inputSchema": {"type": "object", "properties": {"log_type": {"type": "string", "enum": ["status", "error", "notification"], "default": "status"}}, "required": [], "additionalProperties": False}}
+        ]
+
+    async def execute_domoticz_tool(self, name: str, arguments: Dict[str, Any], access_token: str) -> Dict[str, Any]:
+        try:
+            if not self.domoticz_oauth_client:
+                Domoticz.Error("OAuth client not configured for tool execution")
+                return {"error": "Domoticz OAuth client not configured"}
+            if name == "domoticz_get_version":
+                Domoticz.Debug("Execute tool domoticz_get_version")
+                return self.domoticz_oauth_client.make_authenticated_request(access_token, {"type": "command", "param": "getversion"})
+            if name == "domoticz_list_devices":
+                Domoticz.Debug("Execute tool domoticz_list_devices")
+                params = {"type": "command", "param": "getdevices", "filter": arguments.get("filter", "all")}
+                if arguments.get("used", True):
+                    params["used"] = "true"
+                return self.domoticz_oauth_client.make_authenticated_request(access_token, params)
+            if name == "domoticz_device_status":
+                idx = arguments.get("idx")
+                Domoticz.Debug(f"Execute tool domoticz_device_status idx={idx}")
+                if not idx:
+                    return {"error": "idx parameter is required"}
+                return self.domoticz_oauth_client.make_authenticated_request(access_token, {"type": "command", "param": "getdevices", "rid": str(idx)})
+            if name == "domoticz_list_scenes":
+                Domoticz.Debug("Execute tool domoticz_list_scenes")
+                return self.domoticz_oauth_client.make_authenticated_request(access_token, {"type": "command", "param": "getscenes"})
+            if name == "domoticz_get_log":
+                Domoticz.Debug("Execute tool domoticz_get_log")
+                return self.domoticz_oauth_client.make_authenticated_request(access_token, {"type": "command", "param": "getlog", "log": arguments.get("log_type", "status")})
+            Domoticz.Error(f"Unknown tool requested: {name}")
+            return {"error": f"Unknown tool: {name}"}
+        except Exception as e:
+            Domoticz.Error(f"Tool execution failed: {e}")
+            return {"error": f"Tool execution failed: {e}"}
+
+    # ---- lifecycle --------------------------------------------------------
+    async def start_server(self):
+        if not AIOHTTP_AVAILABLE:
+            Domoticz.Error("aiohttp not available - cannot start HTTP server")
+            return None
+        runner = web.AppRunner(self.app)
+        await runner.setup()
+        site = web.TCPSite(runner, self.host, self.port)
+        await site.start()
+        Domoticz.Log(f"Domoticz MCP Server v2.0.0 started on http://{self.host}:{self.port}")
+        Domoticz.Log(f"Health check: http://{self.host}:{self.port}/health")
+        Domoticz.Log(f"Server info: http://{self.host}:{self.port}/info")
+        Domoticz.Log(f"MCP endpoint: http://{self.host}:{self.port}/mcp")
+        Domoticz.Log(f"Protocol: MCP 2025-06-18 compliant")
+        Domoticz.Log(f"Authentication: OAuth 2.1 passthrough to Domoticz")
+        return runner
