@@ -3,7 +3,7 @@
     <description>
         Plugin for running Domoticz MCP (Model Context Protocol) Server.
         Provides AI assistant access to Domoticz functionality through MCP protocol.
-        Authentication is handled via OAuth 2.1 flow - plugin acts as OAuth client to Domoticz.
+        Authentication is handled via OAuth 2.1 flow - plugin acts as OAuth client to Domoticz (client/app credentials now supplied by external caller only).
     </description>
     <params>
         <param field="Mode1" label="Auto Start Server" width="75px">
@@ -14,8 +14,6 @@
         </param>
         <param field="Mode2" label="Health Check interval (seconds)" width="30px" required="true" default="30"/>
         <param field="Mode3" label="Domoticz URL Override" width="200px" required="false" default="" placeholder="Leave empty for http://127.0.0.1:8080"/>
-        <param field="Mode4" label="OAuth Client ID" width="200px" required="false" default="" placeholder="OAuth Client ID for Domoticz authentication"/>
-        <param field="Mode5" label="OAuth Client Secret" width="200px" required="false" default="" placeholder="OAuth Client Secret for Domoticz authentication"/>
         <param field="Mode6" label="Debug" width="200px">
             <options>
                 <option label="None" value="0" default="true"/>
@@ -100,40 +98,30 @@ class DomoticzOAuthClient:
         self.domoticz_base_url = domoticz_base_url.rstrip('/')
         self.session = requests.Session()
         self.oauth_config = None
-        self.client_id = ""
-        self.client_secret = ""
-    
-    def _normalize_oauth_config_hosts(self):
-        """Ensure all discovered endpoints use the override host, not domoticz.local.*"""
-        if not self.oauth_config:
-            return
-        try:
-            target = urllib.parse.urlparse(self.domoticz_base_url)
-            target_netloc = target.netloc
-            for key in ['authorization_endpoint', 'token_endpoint', 'issuer']:
-                val = self.oauth_config.get(key)
-                if not val or '://' not in val:
-                    continue
-                parsed = urllib.parse.urlparse(val)
-                # If server advertises domoticz.local (with or without port) or hostname differs from override -> rewrite
-                if parsed.hostname and (parsed.hostname.startswith('domoticz.local') or parsed.netloc != target_netloc):
-                    new_url = urllib.parse.urlunparse((parsed.scheme, target_netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
-                    if new_url != val:
-                        self.oauth_config[key] = new_url
-                        Domoticz.Debug(f"Normalized OAuth {key}: {new_url}")
-        except Exception as e:
-            Domoticz.Debug(f"OAuth host normalization skipped: {e}")
         
     def discover_oauth_endpoints(self):
         """Discover OAuth endpoints from Domoticz's .well-known configuration"""
         try:
+            # Try to get OAuth configuration from Domoticz
             well_known_url = f"{self.domoticz_base_url}/.well-known/openid-configuration"
             response = self.session.get(well_known_url, timeout=10)
             
             if response.status_code == 200:
                 self.oauth_config = response.json()
-                # Normalize hosts to override base URL host
-                self._normalize_oauth_config_hosts()
+                
+                # Fix hostname issues - replace domoticz.local with actual IP
+                base_url_parts = urllib.parse.urlparse(self.domoticz_base_url)
+                actual_host = base_url_parts.netloc
+                
+                # Update endpoints to use actual host instead of domoticz.local
+                for key in ['authorization_endpoint', 'token_endpoint', 'issuer']:
+                    if key in self.oauth_config:
+                        endpoint_url = self.oauth_config[key]
+                        if 'domoticz.local' in endpoint_url:
+                            # Replace domoticz.local with actual host
+                            self.oauth_config[key] = endpoint_url.replace('domoticz.local:8080', actual_host)
+                            Domoticz.Debug(f"Fixed endpoint {key}: {self.oauth_config[key]}")
+                
                 Domoticz.Log(f"Discovered Domoticz OAuth endpoints: {well_known_url}")
                 return True
             else:
@@ -296,10 +284,6 @@ class DomoticzMCPServer:
             self.app.router.add_get('/health', self.health_check)
             self.app.router.add_get('/info', self.server_info)
             
-            # OAuth pass-through (proxy) endpoints to satisfy clients expecting them at MCP base
-            self.app.router.add_get('/authorize', self.proxy_authorize)
-            self.app.router.add_post('/token', self.proxy_token)
-            
         except Exception as e:
             Domoticz.Error(f"Error setting up routes: {e}")
     
@@ -323,93 +307,17 @@ class DomoticzMCPServer:
             "description": "MCP 2025-06-18 compliant server for Domoticz with OAuth passthrough authentication"
         }
         
+        # Fetch Domoticz OpenID Connect configuration using configured URL
         if self.domoticz_oauth_client:
-            # Prefer already discovered & normalized config
-            if self.domoticz_oauth_client.oauth_config:
-                info["authorization"] = self.domoticz_oauth_client.oauth_config
-            else:
-                try:
-                    well_known_url = f"{self.domoticz_oauth_client.domoticz_base_url}/.well-known/openid-configuration"
-                    response = requests.get(well_known_url, timeout=5)
-                    if response.status_code == 200:
-                        cfg = response.json()
-                        # Temporarily assign then normalize
-                        self.domoticz_oauth_client.oauth_config = cfg
-                        self.domoticz_oauth_client._normalize_oauth_config_hosts()
-                        info["authorization"] = self.domoticz_oauth_client.oauth_config
-                except Exception as e:
-                    Domoticz.Log(f"Warning: Failed to fetch Domoticz OpenID Connect configuration: {e}")
+            try:
+                well_known_url = f"{self.domoticz_oauth_client.domoticz_base_url}/.well-known/openid-configuration"
+                response = requests.get(well_known_url, timeout=5)
+                if response.status_code == 200:
+                    info["authorization"] = response.json()
+            except Exception as e:
+                Domoticz.Log(f"Warning: Failed to fetch Domoticz OpenID Connect configuration: {e}")
         
         return web.json_response(info)
-
-    async def proxy_authorize(self, request: web_request.Request) -> web_response.Response:
-        """Proxy /authorize requests to Domoticz authorization endpoint.
-        Many MCP clients assume /authorize is hosted on same origin as MCP server."""
-        try:
-            if not self.domoticz_oauth_client:
-                return web.json_response({"error": "OAuth client not configured"}, status=500)
-            if not self.domoticz_oauth_client.oauth_config:
-                self.domoticz_oauth_client.discover_oauth_endpoints()
-            if not self.domoticz_oauth_client.oauth_config:
-                return web.json_response({"error": "Could not discover Domoticz OAuth endpoints"}, status=500)
-            auth_endpoint = self.domoticz_oauth_client.oauth_config.get('authorization_endpoint')
-            if not auth_endpoint:
-                return web.json_response({"error": "authorization_endpoint missing"}, status=500)
-            # Copy and sanitize query parameters
-            query_params = dict(request.rel_url.query)
-            # Strip client_secret if a misguided client sent it here
-            if 'client_secret' in query_params:
-                Domoticz.Log("Stripping client_secret from /authorize request query parameters")
-                query_params.pop('client_secret')
-            # If plugin has stored client_id and incoming differs (or missing), enforce stored one
-            if self.domoticz_oauth_client.client_id:
-                incoming = query_params.get('client_id')
-                if incoming != self.domoticz_oauth_client.client_id:
-                    Domoticz.Log("Overriding client_id in /authorize with configured one")
-                query_params['client_id'] = self.domoticz_oauth_client.client_id
-            target_url = auth_endpoint + ('?' + urllib.parse.urlencode(query_params) if query_params else '')
-            Domoticz.Debug(f"Proxy /authorize redirect -> {target_url}")
-            raise web.HTTPFound(location=target_url)
-        except web.HTTPException:
-            raise
-        except Exception as e:
-            Domoticz.Error(f"/authorize proxy error: {e}")
-            return web.json_response({"error": str(e)}, status=500)
-
-    async def proxy_token(self, request: web_request.Request) -> web_response.Response:
-        """Proxy /token requests to Domoticz token endpoint."""
-        try:
-            if not self.domoticz_oauth_client:
-                return web.json_response({"error": "OAuth client not configured"}, status=500)
-            if not self.domoticz_oauth_client.oauth_config:
-                self.domoticz_oauth_client.discover_oauth_endpoints()
-            if not self.domoticz_oauth_client.oauth_config:
-                return web.json_response({"error": "Could not discover Domoticz OAuth endpoints"}, status=500)
-            token_endpoint = self.domoticz_oauth_client.oauth_config.get('token_endpoint')
-            if not token_endpoint:
-                return web.json_response({"error": "token_endpoint missing"}, status=500)
-            form = await request.post()
-            form_data = dict(form)
-            # Enforce configured client credentials if present
-            if self.domoticz_oauth_client.client_id:
-                form_data['client_id'] = self.domoticz_oauth_client.client_id
-            if self.domoticz_oauth_client.client_secret:
-                form_data['client_secret'] = self.domoticz_oauth_client.client_secret
-            # Execute blocking request in executor
-            loop = asyncio.get_event_loop()
-            def do_request():
-                return requests.post(token_endpoint, data=form_data, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=15)
-            resp = await loop.run_in_executor(None, do_request)
-            Domoticz.Debug(f"/token proxy status {resp.status_code}")
-            content_type = resp.headers.get('Content-Type', '')
-            try:
-                data = resp.json()
-            except Exception:
-                data = {'raw': resp.text}
-            return web.json_response(data, status=resp.status_code)
-        except Exception as e:
-            Domoticz.Error(f"/token proxy error: {e}")
-            return web.json_response({"error": str(e)}, status=500)
 
     async def handle_mcp_request(self, request: web_request.Request) -> web_response.Response:
         """Handle all MCP protocol requests - MCP 2025-06-18 compliant"""
@@ -461,8 +369,8 @@ class DomoticzMCPServer:
                     return web.Response(
                         status=401,
                         text="Missing or invalid access token",
-                        headers={'WWW-Authenticate': 'Bearer realm="Domoticz MCP"'
-                    })
+                        headers={'WWW-Authenticate': 'Bearer realm="Domoticz MCP"'}
+                    )
                 else:
                     # Extract token from Authorization header
                     access_token = auth_header[7:]  # Remove 'Bearer ' prefix
@@ -688,8 +596,6 @@ class BasePlugin:
         
         # Optional Domoticz URL override
         self.default_domoticz_url = ""
-        self.oauth_client_id = ""
-        self.oauth_client_secret = ""
 
     def onStart(self):
         Domoticz.Debug("onStart called")
@@ -705,33 +611,12 @@ class BasePlugin:
         # Set optional Domoticz URL override
         self.default_domoticz_url = Parameters.get("Mode3", "").strip()
         
-        # Set OAuth credentials
-        self.oauth_client_id = Parameters.get("Mode4", "").strip()
-        self.oauth_client_secret = Parameters.get("Mode5", "").strip()
-        
-        if self.default_domoticz_url:
-            Domoticz.Log(f"Domoticz URL override: {self.default_domoticz_url}")
-        else:
-            Domoticz.Log("Using default Domoticz URL: http://127.0.0.1:8080")
-            
-        if self.oauth_client_id:
-            Domoticz.Log("OAuth Client ID configured")
-        else:
-            Domoticz.Log("OAuth Client ID not configured - OAuth flows will not work")
-            
-        if self.oauth_client_secret:
-            Domoticz.Log("OAuth Client Secret configured")
-        else:
-            Domoticz.Log("OAuth Client Secret not configured - OAuth flows will not work")
+        Domoticz.Log(f"Domoticz URL override: {self.default_domoticz_url}" if self.default_domoticz_url else "Using default Domoticz URL: http://127.0.0.1:8080")
         
         # Set up Domoticz OAuth client
         domoticz_base_url = self.default_domoticz_url if self.default_domoticz_url else "http://127.0.0.1:8080"
         self.domoticz_oauth_client = DomoticzOAuthClient(domoticz_base_url)
         
-        # Store OAuth credentials in the client for later use
-        self.domoticz_oauth_client.client_id = self.oauth_client_id
-        self.domoticz_oauth_client.client_secret = self.oauth_client_secret
-
         # Try to discover OAuth endpoints
         if self.domoticz_oauth_client.discover_oauth_endpoints():
             Domoticz.Log("Domoticz OAuth endpoints discovered successfully")
@@ -999,9 +884,7 @@ class BasePlugin:
                     "restart_attempts": self.restart_attempts,
                     "protocol_version": "MCP 2025-06-18",
                     "authentication": "OAuth 2.1 passthrough",
-                    "domoticz_oauth_configured": self.domoticz_oauth_client.oauth_config is not None,
-                    "oauth_client_id_configured": bool(self.oauth_client_id),
-                    "oauth_client_secret_configured": bool(self.oauth_client_secret)
+                    "domoticz_oauth_configured": self.domoticz_oauth_client.oauth_config is not None
                 }
                 
                 # Get additional server info if available
