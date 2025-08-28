@@ -373,8 +373,8 @@ class DomoticzMCPServer:
                     return web.Response(
                         status=401,
                         text="Missing or invalid access token",
-                        headers={'WWW-Authenticate': 'Bearer realm="Domoticz MCP"'
-                    })
+                        headers={'WWW-Authenticate': 'Bearer realm="Domoticz MCP"'}
+                    )
                 else:
                     # Extract token from Authorization header
                     access_token = auth_header[7:]  # Remove 'Bearer ' prefix
@@ -434,7 +434,7 @@ class DomoticzMCPServer:
             {
                 "name": "domoticz_get_version",
                 "description": "Get Domoticz version information",
-                "inputSchema ": {
+                "inputSchema": {
                     "type": "object",
                     "properties": {},
                     "required": [],
@@ -444,7 +444,7 @@ class DomoticzMCPServer:
             {
                 "name": "domoticz_list_devices",
                 "description": "List all Domoticz devices with optional filtering",
-                "inputSchema ": {
+                "inputSchema": {
                     "type": "object",
                     "properties": {
                         "filter": {
@@ -466,7 +466,7 @@ class DomoticzMCPServer:
             {
                 "name": "domoticz_device_status",
                 "description": "Get detailed status of a specific device",
-                "inputSchema ": {
+                "inputSchema": {
                     "type": "object",
                     "properties": {
                         "idx": {
@@ -482,7 +482,7 @@ class DomoticzMCPServer:
             {
                 "name": "domoticz_list_scenes",
                 "description": "List all scenes and groups",
-                "inputSchema ": {
+                "inputSchema": {
                     "type": "object",
                     "properties": {},
                     "required": [],
@@ -492,7 +492,7 @@ class DomoticzMCPServer:
             {
                 "name": "domoticz_get_log",
                 "description": "Retrieve Domoticz logs",
-                "inputSchema ": {
+                "inputSchema": {
                     "type": "object",
                     "properties": {
                         "log_type": {
@@ -1008,4 +1008,4 @@ def onHeartbeat():
 
 def onCommand(Unit, Command, Level, Hue):
     global _plugin
-    _plugin.onCommand(Unit, Command, Level, Hue)    _plugin.onCommand(Unit, Command, Level, Hue)
+    _plugin.onCommand(Unit, Command, Level, Hue)
