@@ -199,7 +199,13 @@ class DomoticzMCPServer:
             Domoticz.Debug(f"Redirect bridge forwarding -> {forward}")
             if self.debug_bridge_page:
                 # Show an HTML page with manual copy option instead of auto redirect
-                body = f"<html><body><h3>Authorization Complete</h3><p>State: {state}</p><p>Code: {code or error}</p><p>Forward target: {forward}</p><p>Close this tab if your client captured the code.</p><script>setTimeout(function(){window.location='{forward}';},1500);</script></body></html>"
+                # Use doubled braces to escape literal JS braces inside f-string
+                body = (f"<html><body><h3>Authorization Complete</h3>"
+                        f"<p>State: {state}</p><p>Code: {code or error}</p>"
+                        f"<p>Forward target: {forward}</p>"
+                        f"<p>Close this tab if your client captured the code.</p>"
+                        f"<script>setTimeout(function(){{window.location='{forward}';}},1500);</script>"
+                        f"</body></html>")
                 return web.Response(text=body, content_type='text/html')
             raise web.HTTPFound(location=forward)
         except web.HTTPException:
