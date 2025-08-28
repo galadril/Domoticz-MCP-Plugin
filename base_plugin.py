@@ -13,6 +13,12 @@ from mcp_server import DomoticzMCPServer, AIOHTTP_AVAILABLE, MCP_SDK_AVAILABLE
 
 plugin_path = os.path.dirname(os.path.realpath(__file__))
 
+# Provide safe fallbacks when running outside real Domoticz runtime (e.g. tests)
+try:  # noqa: SIM105
+    Devices  # type: ignore  # noqa: F821
+except NameError:  # pragma: no cover - only hits in non-Domoticz context
+    Devices = {}
+
 class BasePlugin:
     def __init__(self):
         self.mcp_server: Optional[DomoticzMCPServer] = None
@@ -36,19 +42,38 @@ class BasePlugin:
     # ---- Domoticz callbacks ----------------------------------------------
     def onStart(self):
         Domoticz.Debug("onStart called")
-        if Parameters["Mode2"] != "":
-            self.health_check_interval = int(Parameters["Mode2"])
-        self.auto_start_server = Parameters["Mode1"] == "true"
-        Domoticz.Log(f"Auto start server is {'enabled' if self.auto_start_server else 'disabled'}")
-        self.default_domoticz_url = Parameters.get("Mode3", "").strip()
-        Domoticz.Log(f"Domoticz URL override: {self.default_domoticz_url}" if self.default_domoticz_url else "Using default Domoticz URL: http://127.0.0.1:8080")
-        domoticz_base_url = self.default_domoticz_url if self.default_domoticz_url else "http://127.0.0.1:8080"
-        self.domoticz_oauth_client = DomoticzOAuthClient(domoticz_base_url)
-        if self.domoticz_oauth_client.discover_oauth_endpoints():
-            Domoticz.Log("Domoticz OAuth endpoints discovered successfully")
-        else:
-            Domoticz.Error("Failed to discover Domoticz OAuth endpoints - OAuth features may not work")
-        Domoticz.Debugging(int(Parameters["Mode6"]))
+        # In normal Domoticz runtime Parameters should exist; if not, we abort quietly.
+        if 'Parameters' not in globals():  # noqa: F821
+            Domoticz.Error("Parameters missing (non-Domoticz test environment) - skipping startup")
+            return
+        try:
+            # Log all parameters once for diagnostics
+            try:
+                Domoticz.Log("Plugin Parameters: " + ", ".join(f"{k}={v}" for k,v in Parameters.items()))  # type: ignore  # noqa: F821
+            except Exception:
+                pass
+            mode2 = Parameters.get("Mode2", "30")  # type: ignore  # noqa: F821
+            if str(mode2).strip():
+                try:
+                    self.health_check_interval = int(mode2)
+                except ValueError:
+                    Domoticz.Error(f"Invalid Mode2 value '{mode2}', using default 30")
+                    self.health_check_interval = 30
+            self.auto_start_server = Parameters.get("Mode1", "true") == "true"  # type: ignore  # noqa: F821
+            Domoticz.Log(f"Auto start server is {'enabled' if self.auto_start_server else 'disabled'} (Mode1={Parameters.get('Mode1')})")  # type: ignore  # noqa: F821
+            self.default_domoticz_url = str(Parameters.get("Mode3", "")).strip()  # type: ignore  # noqa: F821
+            Domoticz.Log(f"Domoticz URL override: {self.default_domoticz_url}" if self.default_domoticz_url else "Using default Domoticz URL: http://127.0.0.1:8080")
+            domoticz_base_url = self.default_domoticz_url if self.default_domoticz_url else "http://127.0.0.1:8080"
+            self.domoticz_oauth_client = DomoticzOAuthClient(domoticz_base_url)
+            if self.domoticz_oauth_client.discover_oauth_endpoints():
+                Domoticz.Log("Domoticz OAuth endpoints discovered successfully")
+            else:
+                Domoticz.Error("Failed to discover Domoticz OAuth endpoints - OAuth features may not work")
+            debug_level = Parameters.get("Mode6", "0")  # type: ignore  # noqa: F821
+            Domoticz.Debugging(int(debug_level))
+        except Exception as e:
+            Domoticz.Error(f"Error initializing with Parameters: {e}")
+            return
         self._create_status_device()
         if not AIOHTTP_AVAILABLE:
             Domoticz.Error("aiohttp module not available. Server cannot be started.")
@@ -101,10 +126,13 @@ class BasePlugin:
 
     # ---- internal helpers -------------------------------------------------
     def _create_status_device(self):
-        if 1 not in Devices:
-            Domoticz.Device(Name="MCP Server Status", Unit=1, TypeName="Switch", Description="MCP Server running status and control").Create()
-        if 2 not in Devices:
-            Domoticz.Device(Name="MCP Server Info", Unit=2, TypeName="Text", Description="MCP Server information and statistics").Create()
+        try:
+            if 1 not in Devices:
+                Domoticz.Device(Name="MCP Server Status", Unit=1, TypeName="Switch", Description="MCP Server running status and control").Create()
+            if 2 not in Devices:
+                Domoticz.Device(Name="MCP Server Info", Unit=2, TypeName="Text", Description="MCP Server information and statistics").Create()
+        except Exception as e:  # pragma: no cover
+            Domoticz.Error(f"Unable to create devices: {e}")
 
     def _start_mcp_server(self):
         if not AIOHTTP_AVAILABLE:
@@ -197,7 +225,7 @@ class BasePlugin:
             if 1 in Devices:
                 Devices[1].Update(nValue=1 if is_running else 0, sValue="On" if is_running else "Off")
             if 2 in Devices:
-                info = {"status": status_text, "host": self.host, "port": self.port, "aiohttp_available": AIOHTTP_AVAILABLE, "mcp_sdk_available": MCP_SDK_AVAILABLE, "uptime": int(time.time() - self.server_start_time) if self.server_start_time else 0, "last_check": time.strftime("%Y-%m-%d %H:%M:%S"), "restart_attempts": self.restart_attempts, "protocol_version": "MCP 2025-06-18", "authentication": "OAuth 2.1 passthrough", "domoticz_oauth_configured": self.domoticz_oauth_client.oauth_config is not None}
+                info = {"status": status_text, "host": self.host, "port": self.port, "aiohttp_available": AIOHTTP_AVAILABLE, "mcp_sdk_available": MCP_SDK_AVAILABLE, "uptime": int(time.time() - self.server_start_time) if self.server_start_time else 0, "last_check": time.strftime("%Y-%m-%d %H:%M:%S"), "restart_attempts": self.restart_attempts, "protocol_version": "MCP 2025-06-18", "authentication": "OAuth 2.1 passthrough", "domoticz_oauth_configured": self.domoticz_oauth_client.oauth_config is not None if self.domoticz_oauth_client else False}
                 extra = self._get_server_info()
                 if extra:
                     info.update(extra)
