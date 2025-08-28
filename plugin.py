@@ -35,14 +35,22 @@ from base_plugin import BasePlugin
 
 _plugin = BasePlugin()
 
+
 def onStart():
-    _plugin.onStart()
+    try:
+        _plugin.onStart(Parameters)  # pass Domoticz Parameters dict explicitly
+    except Exception as e:
+        import Domoticz
+        Domoticz.Error(f"Wrapper onStart failed: {e}")
+
 
 def onStop():
     _plugin.onStop()
 
+
 def onHeartbeat():
     _plugin.onHeartbeat()
+
 
 def onCommand(Unit, Command, Level, Hue):
     _plugin.onCommand(Unit, Command, Level, Hue)

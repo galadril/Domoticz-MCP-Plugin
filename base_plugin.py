@@ -3,7 +3,7 @@ import json
 import os
 import threading
 import time
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import Domoticz
 import requests
@@ -40,28 +40,20 @@ class BasePlugin:
         self.default_domoticz_url = ""
 
     # ---- Domoticz callbacks ----------------------------------------------
-    def onStart(self):
+    def onStart(self, parameters: Dict[str, Any]):
         Domoticz.Debug("onStart called")
-        # In normal Domoticz runtime Parameters should exist; if not, we abort quietly.
-        if 'Parameters' not in globals():  # noqa: F821
-            Domoticz.Error("Parameters missing (non-Domoticz test environment) - skipping startup")
-            return
         try:
-            # Log all parameters once for diagnostics
-            try:
-                Domoticz.Log("Plugin Parameters: " + ", ".join(f"{k}={v}" for k,v in Parameters.items()))  # type: ignore  # noqa: F821
-            except Exception:
-                pass
-            mode2 = Parameters.get("Mode2", "30")  # type: ignore  # noqa: F821
+            Domoticz.Log("Plugin Parameters: " + ", ".join(f"{k}={v}" for k, v in parameters.items()))
+            mode2 = parameters.get("Mode2", "30")
             if str(mode2).strip():
                 try:
                     self.health_check_interval = int(mode2)
                 except ValueError:
                     Domoticz.Error(f"Invalid Mode2 value '{mode2}', using default 30")
                     self.health_check_interval = 30
-            self.auto_start_server = Parameters.get("Mode1", "true") == "true"  # type: ignore  # noqa: F821
-            Domoticz.Log(f"Auto start server is {'enabled' if self.auto_start_server else 'disabled'} (Mode1={Parameters.get('Mode1')})")  # type: ignore  # noqa: F821
-            self.default_domoticz_url = str(Parameters.get("Mode3", "")).strip()  # type: ignore  # noqa: F821
+            self.auto_start_server = parameters.get("Mode1", "true") == "true"
+            Domoticz.Log(f"Auto start server is {'enabled' if self.auto_start_server else 'disabled'} (Mode1={parameters.get('Mode1')})")
+            self.default_domoticz_url = str(parameters.get("Mode3", "")).strip()
             Domoticz.Log(f"Domoticz URL override: {self.default_domoticz_url}" if self.default_domoticz_url else "Using default Domoticz URL: http://127.0.0.1:8080")
             domoticz_base_url = self.default_domoticz_url if self.default_domoticz_url else "http://127.0.0.1:8080"
             self.domoticz_oauth_client = DomoticzOAuthClient(domoticz_base_url)
@@ -69,7 +61,7 @@ class BasePlugin:
                 Domoticz.Log("Domoticz OAuth endpoints discovered successfully")
             else:
                 Domoticz.Error("Failed to discover Domoticz OAuth endpoints - OAuth features may not work")
-            debug_level = Parameters.get("Mode6", "0")  # type: ignore  # noqa: F821
+            debug_level = parameters.get("Mode6", "0")
             Domoticz.Debugging(int(debug_level))
         except Exception as e:
             Domoticz.Error(f"Error initializing with Parameters: {e}")
