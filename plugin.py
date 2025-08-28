@@ -1,4 +1,4 @@
-﻿"""
+"""
 <plugin key="Domoticz-MCP-Server" name="Domoticz MCP Server Plugin" author="Mark Heinis" version="2.0.0" wikilink="https://github.com/galadril/Domoticz-MCP-Service/wiki" externallink="https://github.com/galadril/Domoticz-MCP-Service">
     <description>
         Plugin for running Domoticz MCP (Model Context Protocol) Server.
@@ -13,7 +13,9 @@
             </options>
         </param>
         <param field="Mode2" label="Health Check interval (seconds)" width="30px" required="true" default="30"/>
-        <param field="Mode3" label="Domoticz URL Override" width="200px" required="false" default="" placeholder="Leave empty for localhost:8080"/>
+        <param field="Mode3" label="Domoticz URL Override" width="200px" required="false" default="" placeholder="Leave empty for http://127.0.0.1:8080"/>
+        <param field="Mode4" label="OAuth Client ID" width="200px" required="false" default="" placeholder="OAuth Client ID for Domoticz authentication"/>
+        <param field="Mode5" label="OAuth Client Secret" width="200px" required="false" default="" placeholder="OAuth Client Secret for Domoticz authentication"/>
         <param field="Mode6" label="Debug" width="200px">
             <options>
                 <option label="None" value="0" default="true"/>
@@ -98,6 +100,8 @@ class DomoticzOAuthClient:
         self.domoticz_base_url = domoticz_base_url.rstrip('/')
         self.session = requests.Session()
         self.oauth_config = None
+        self.client_id = ""
+        self.client_secret = ""
         
     def discover_oauth_endpoints(self):
         """Discover OAuth endpoints from Domoticz's .well-known configuration"""
@@ -306,6 +310,17 @@ class DomoticzMCPServer:
             "authentication_model": "oauth_2_1_passthrough",
             "description": "MCP 2025-06-18 compliant server for Domoticz with OAuth passthrough authentication"
         }
+        
+        # Fetch Domoticz OpenID Connect configuration using configured URL
+        if self.domoticz_oauth_client:
+            try:
+                well_known_url = f"{self.domoticz_oauth_client.domoticz_base_url}/.well-known/openid-configuration"
+                response = requests.get(well_known_url, timeout=5)
+                if response.status_code == 200:
+                    info["authorization"] = response.json()
+            except Exception as e:
+                Domoticz.Log(f"Warning: Failed to fetch Domoticz OpenID Connect configuration: {e}")
+        
         return web.json_response(info)
 
     async def handle_mcp_request(self, request: web_request.Request) -> web_response.Response:
@@ -354,14 +369,12 @@ class DomoticzMCPServer:
                 # Check for Authorization header (MCP client authentication)
                 auth_header = request.headers.get('Authorization')
                 if not auth_header or not auth_header.startswith('Bearer '):
-                    response = {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "error": {
-                            "code": -32602,
-                            "message": "Bearer token required in Authorization header"
-                        }
-                    }
+                    # Return 401 Unauthorized with WWW-Authenticate header
+                    return web.Response(
+                        status=401,
+                        text="Missing or invalid access token",
+                        headers={'WWW-Authenticate': 'Bearer realm="Domoticz MCP"'
+                    })
                 else:
                     # Extract token from Authorization header
                     access_token = auth_header[7:]  # Remove 'Bearer ' prefix
@@ -421,7 +434,7 @@ class DomoticzMCPServer:
             {
                 "name": "domoticz_get_version",
                 "description": "Get Domoticz version information",
-                "inputSchema": {
+                "inputSchema ": {
                     "type": "object",
                     "properties": {},
                     "required": [],
@@ -431,7 +444,7 @@ class DomoticzMCPServer:
             {
                 "name": "domoticz_list_devices",
                 "description": "List all Domoticz devices with optional filtering",
-                "inputSchema": {
+                "inputSchema ": {
                     "type": "object",
                     "properties": {
                         "filter": {
@@ -453,7 +466,7 @@ class DomoticzMCPServer:
             {
                 "name": "domoticz_device_status",
                 "description": "Get detailed status of a specific device",
-                "inputSchema": {
+                "inputSchema ": {
                     "type": "object",
                     "properties": {
                         "idx": {
@@ -469,7 +482,7 @@ class DomoticzMCPServer:
             {
                 "name": "domoticz_list_scenes",
                 "description": "List all scenes and groups",
-                "inputSchema": {
+                "inputSchema ": {
                     "type": "object",
                     "properties": {},
                     "required": [],
@@ -479,7 +492,7 @@ class DomoticzMCPServer:
             {
                 "name": "domoticz_get_log",
                 "description": "Retrieve Domoticz logs",
-                "inputSchema": {
+                "inputSchema ": {
                     "type": "object",
                     "properties": {
                         "log_type": {
@@ -498,7 +511,7 @@ class DomoticzMCPServer:
     async def execute_domoticz_tool(self, name: str, arguments: Dict[str, Any], access_token: str) -> Dict[str, Any]:
         """Execute a Domoticz tool using OAuth access token"""
         try:
-            Domoticz.Debug(f"Executing tool: {name}")
+            Domoticz.Debug(f"Executing tool: {name}");
 
             if not self.domoticz_oauth_client:
                 return {"error": "Domoticz OAuth client not configured"}
@@ -587,6 +600,8 @@ class BasePlugin:
         
         # Optional Domoticz URL override
         self.default_domoticz_url = ""
+        self.oauth_client_id = ""
+        self.oauth_client_secret = ""
 
     def onStart(self):
         Domoticz.Debug("onStart called")
@@ -602,15 +617,33 @@ class BasePlugin:
         # Set optional Domoticz URL override
         self.default_domoticz_url = Parameters.get("Mode3", "").strip()
         
+        # Set OAuth credentials
+        self.oauth_client_id = Parameters.get("Mode4", "").strip()
+        self.oauth_client_secret = Parameters.get("Mode5", "").strip()
+        
         if self.default_domoticz_url:
             Domoticz.Log(f"Domoticz URL override: {self.default_domoticz_url}")
         else:
-            Domoticz.Log("Using default Domoticz URL: localhost:8080")
+            Domoticz.Log("Using default Domoticz URL: http://127.0.0.1:8080")
+            
+        if self.oauth_client_id:
+            Domoticz.Log("OAuth Client ID configured")
+        else:
+            Domoticz.Log("OAuth Client ID not configured - OAuth flows will not work")
+            
+        if self.oauth_client_secret:
+            Domoticz.Log("OAuth Client Secret configured")
+        else:
+            Domoticz.Log("OAuth Client Secret not configured - OAuth flows will not work")
         
         # Set up Domoticz OAuth client
         domoticz_base_url = self.default_domoticz_url if self.default_domoticz_url else "http://127.0.0.1:8080"
         self.domoticz_oauth_client = DomoticzOAuthClient(domoticz_base_url)
         
+        # Store OAuth credentials in the client for later use
+        self.domoticz_oauth_client.client_id = self.oauth_client_id
+        self.domoticz_oauth_client.client_secret = self.oauth_client_secret
+
         # Try to discover OAuth endpoints
         if self.domoticz_oauth_client.discover_oauth_endpoints():
             Domoticz.Log("Domoticz OAuth endpoints discovered successfully")
@@ -878,7 +911,9 @@ class BasePlugin:
                     "restart_attempts": self.restart_attempts,
                     "protocol_version": "MCP 2025-06-18",
                     "authentication": "OAuth 2.1 passthrough",
-                    "domoticz_oauth_configured": self.domoticz_oauth_client.oauth_config is not None
+                    "domoticz_oauth_configured": self.domoticz_oauth_client.oauth_config is not None,
+                    "oauth_client_id_configured": bool(self.oauth_client_id),
+                    "oauth_client_secret_configured": bool(self.oauth_client_secret)
                 }
                 
                 # Get additional server info if available
@@ -973,4 +1008,4 @@ def onHeartbeat():
 
 def onCommand(Unit, Command, Level, Hue):
     global _plugin
-    _plugin.onCommand(Unit, Command, Level, Hue)
+    _plugin.onCommand(Unit, Command, Level, Hue)    _plugin.onCommand(Unit, Command, Level, Hue)
