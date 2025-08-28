@@ -38,7 +38,8 @@ _plugin = BasePlugin()
 
 def onStart():
     try:
-        _plugin.onStart(Parameters)  # pass Domoticz Parameters dict explicitly
+        # Pass both Parameters and Devices explicitly so BasePlugin does not depend on globals timing
+        _plugin.onStart(Parameters, Devices)  # noqa: F821
     except Exception as e:
         import Domoticz
         Domoticz.Error(f"Wrapper onStart failed: {e}")

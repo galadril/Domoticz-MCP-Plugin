@@ -13,12 +13,6 @@ from mcp_server import DomoticzMCPServer, AIOHTTP_AVAILABLE, MCP_SDK_AVAILABLE
 
 plugin_path = os.path.dirname(os.path.realpath(__file__))
 
-# Provide safe fallbacks when running outside real Domoticz runtime (e.g. tests)
-try:  # noqa: SIM105
-    Devices  # type: ignore  # noqa: F821
-except NameError:  # pragma: no cover - only hits in non-Domoticz context
-    Devices = {}
-
 class BasePlugin:
     def __init__(self):
         self.mcp_server: Optional[DomoticzMCPServer] = None
@@ -38,9 +32,11 @@ class BasePlugin:
         self.max_restart_attempts = 3
         self.domoticz_oauth_client: Optional[DomoticzOAuthClient] = None
         self.default_domoticz_url = ""
+        self._devices_ref = None  # store passed Devices reference
 
     # ---- Domoticz callbacks ----------------------------------------------
-    def onStart(self, parameters: Dict[str, Any]):
+    def onStart(self, parameters: Dict[str, Any], devices):
+        self._devices_ref = devices  # keep reference
         Domoticz.Debug("onStart called")
         try:
             Domoticz.Log("Plugin Parameters: " + ", ".join(f"{k}={v}" for k, v in parameters.items()))
@@ -119,9 +115,10 @@ class BasePlugin:
     # ---- internal helpers -------------------------------------------------
     def _create_status_device(self):
         try:
-            if 1 not in Devices:
+            devs = self._devices_ref if self._devices_ref is not None else {}
+            if 1 not in devs:
                 Domoticz.Device(Name="MCP Server Status", Unit=1, TypeName="Switch", Description="MCP Server running status and control").Create()
-            if 2 not in Devices:
+            if 2 not in devs:
                 Domoticz.Device(Name="MCP Server Info", Unit=2, TypeName="Text", Description="MCP Server information and statistics").Create()
         except Exception as e:  # pragma: no cover
             Domoticz.Error(f"Unable to create devices: {e}")
@@ -210,17 +207,18 @@ class BasePlugin:
                 return r.json()
         except Exception:  # pragma: no cover
             pass
-        return None
+            return None
 
     def _update_status_device(self, is_running: bool, status_text: str):
         try:
-            if 1 in Devices:
-                Devices[1].Update(nValue=1 if is_running else 0, sValue="On" if is_running else "Off")
-            if 2 in Devices:
+            devs = self._devices_ref if self._devices_ref is not None else {}
+            if 1 in devs:
+                devs[1].Update(nValue=1 if is_running else 0, sValue="On" if is_running else "Off")
+            if 2 in devs:
                 info = {"status": status_text, "host": self.host, "port": self.port, "aiohttp_available": AIOHTTP_AVAILABLE, "mcp_sdk_available": MCP_SDK_AVAILABLE, "uptime": int(time.time() - self.server_start_time) if self.server_start_time else 0, "last_check": time.strftime("%Y-%m-%d %H:%M:%S"), "restart_attempts": self.restart_attempts, "protocol_version": "MCP 2025-06-18", "authentication": "OAuth 2.1 passthrough", "domoticz_oauth_configured": self.domoticz_oauth_client.oauth_config is not None if self.domoticz_oauth_client else False}
                 extra = self._get_server_info()
                 if extra:
                     info.update(extra)
-                Devices[2].Update(nValue=0, sValue=json.dumps(info, indent=2))
+                devs[2].Update(nValue=0, sValue=json.dumps(info, indent=2))
         except Exception as e:
             Domoticz.Error(f"Error updating status device: {e}")
