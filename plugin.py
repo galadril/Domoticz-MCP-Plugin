@@ -288,6 +288,10 @@ class DomoticzMCPServer:
             self.app.router.add_get('/health', self.health_check)
             self.app.router.add_get('/info', self.server_info)
             
+            # OAuth pass-through (proxy) endpoints to satisfy clients expecting them at MCP base
+            self.app.router.add_get('/authorize', self.proxy_authorize)
+            self.app.router.add_post('/token', self.proxy_token)
+            
         except Exception as e:
             Domoticz.Error(f"Error setting up routes: {e}")
     
@@ -322,6 +326,75 @@ class DomoticzMCPServer:
                 Domoticz.Log(f"Warning: Failed to fetch Domoticz OpenID Connect configuration: {e}")
         
         return web.json_response(info)
+
+    async def proxy_authorize(self, request: web_request.Request) -> web_response.Response:
+        """Proxy /authorize requests to Domoticz authorization endpoint.
+        Many MCP clients assume /authorize is hosted on same origin as MCP server."""
+        try:
+            if not self.domoticz_oauth_client:
+                return web.json_response({"error": "OAuth client not configured"}, status=500)
+            if not self.domoticz_oauth_client.oauth_config:
+                self.domoticz_oauth_client.discover_oauth_endpoints()
+            if not self.domoticz_oauth_client.oauth_config:
+                return web.json_response({"error": "Could not discover Domoticz OAuth endpoints"}, status=500)
+            auth_endpoint = self.domoticz_oauth_client.oauth_config.get('authorization_endpoint')
+            if not auth_endpoint:
+                return web.json_response({"error": "authorization_endpoint missing"}, status=500)
+            # Copy and sanitize query parameters
+            query_params = dict(request.rel_url.query)
+            # Strip client_secret if a misguided client sent it here
+            if 'client_secret' in query_params:
+                Domoticz.Log("Stripping client_secret from /authorize request query parameters")
+                query_params.pop('client_secret')
+            # If plugin has stored client_id and incoming differs (or missing), enforce stored one
+            if self.domoticz_oauth_client.client_id:
+                incoming = query_params.get('client_id')
+                if incoming != self.domoticz_oauth_client.client_id:
+                    Domoticz.Log("Overriding client_id in /authorize with configured one")
+                query_params['client_id'] = self.domoticz_oauth_client.client_id
+            target_url = auth_endpoint + ('?' + urllib.parse.urlencode(query_params) if query_params else '')
+            Domoticz.Debug(f"Proxy /authorize redirect -> {target_url}")
+            raise web.HTTPFound(location=target_url)
+        except web.HTTPException:
+            raise
+        except Exception as e:
+            Domoticz.Error(f"/authorize proxy error: {e}")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def proxy_token(self, request: web_request.Request) -> web_response.Response:
+        """Proxy /token requests to Domoticz token endpoint."""
+        try:
+            if not self.domoticz_oauth_client:
+                return web.json_response({"error": "OAuth client not configured"}, status=500)
+            if not self.domoticz_oauth_client.oauth_config:
+                self.domoticz_oauth_client.discover_oauth_endpoints()
+            if not self.domoticz_oauth_client.oauth_config:
+                return web.json_response({"error": "Could not discover Domoticz OAuth endpoints"}, status=500)
+            token_endpoint = self.domoticz_oauth_client.oauth_config.get('token_endpoint')
+            if not token_endpoint:
+                return web.json_response({"error": "token_endpoint missing"}, status=500)
+            form = await request.post()
+            form_data = dict(form)
+            # Enforce configured client credentials if present
+            if self.domoticz_oauth_client.client_id:
+                form_data['client_id'] = self.domoticz_oauth_client.client_id
+            if self.domoticz_oauth_client.client_secret:
+                form_data['client_secret'] = self.domoticz_oauth_client.client_secret
+            # Execute blocking request in executor
+            loop = asyncio.get_event_loop()
+            def do_request():
+                return requests.post(token_endpoint, data=form_data, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=15)
+            resp = await loop.run_in_executor(None, do_request)
+            Domoticz.Debug(f"/token proxy status {resp.status_code}")
+            content_type = resp.headers.get('Content-Type', '')
+            try:
+                data = resp.json()
+            except Exception:
+                data = {'raw': resp.text}
+            return web.json_response(data, status=resp.status_code)
+        except Exception as e:
+            Domoticz.Error(f"/token proxy error: {e}")
+            return web.json_response({"error": str(e)}, status=500)
 
     async def handle_mcp_request(self, request: web_request.Request) -> web_response.Response:
         """Handle all MCP protocol requests - MCP 2025-06-18 compliant"""
@@ -373,8 +446,8 @@ class DomoticzMCPServer:
                     return web.Response(
                         status=401,
                         text="Missing or invalid access token",
-                        headers={'WWW-Authenticate': 'Bearer realm="Domoticz MCP"'}
-                    )
+                        headers={'WWW-Authenticate': 'Bearer realm="Domoticz MCP"'
+                    })
                 else:
                     # Extract token from Authorization header
                     access_token = auth_header[7:]  # Remove 'Bearer ' prefix
