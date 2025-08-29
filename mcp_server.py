@@ -40,10 +40,9 @@ class DomoticzMCPServer:
         self.runner = None
         self.domoticz_oauth_client = domoticz_oauth_client
         # Simplified redirect bridge: always enabled and always logs full authorization code.
-        # Removed environment variable configuration to reduce complexity.
-        # Bridge will derive HTTPS base automatically (still uses HOSTNAME env var if present for host discovery).
+        # Bridge will now derive an HTTP base pointing at this MCP server (no HTTPS assumed by default).
         self.redirect_bridge_enabled = True
-        self.bridge_https_base = None  # optional explicit override removed (always derive if None)
+        self.bridge_https_base = None  # kept name for compatibility (could be http)
         self.bridge_https_port = None  # kept for derivation logic (unused unless set programmatically later)
         self.log_full_code = True      # always log full code (security consideration: code appears in Domoticz log)
         self.debug_bridge_page = False # can be toggled in code if manual inspection page desired
@@ -52,18 +51,27 @@ class DomoticzMCPServer:
             try:
                 # Prefer Domoticz base URL host, fallback to local host name
                 domo_host = None
+                domo_scheme = 'http'
                 if self.domoticz_oauth_client and getattr(self.domoticz_oauth_client, 'domoticz_base_url', None):
                     p = urllib.parse.urlparse(self.domoticz_oauth_client.domoticz_base_url)
                     domo_host = p.hostname
+                    domo_scheme = p.scheme or 'http'
                 if not domo_host:
                     domo_host = os.environ.get('HOSTNAME') or 'localhost'
-                port_part = ''
-                if self.bridge_https_port and self.bridge_https_port not in ('443', ''):
-                    port_part = f":{self.bridge_https_port}"
-                self.bridge_https_base = f"https://{domo_host}{port_part}"
-                Domoticz.Log(f"Derived HTTPS redirect bridge base: {self.bridge_https_base}")
+                # Default: use our MCP server port (self.port) because that is where /redirect_bridge lives.
+                # Only omit port if default http/https port AND matches scheme.
+                bridge_scheme = domo_scheme  # stay consistent with Domoticz base; most likely http
+                # Force http unless explicitly configured otherwise (user can patch later for TLS)
+                if bridge_scheme != 'https':
+                    bridge_scheme = 'http'
+                if (bridge_scheme == 'http' and self.port not in (80,)) or (bridge_scheme == 'https' and self.port not in (443,)):
+                    port_part = f":{self.port}"
+                else:
+                    port_part = ''
+                self.bridge_https_base = f"{bridge_scheme}://{domo_host}{port_part}"
+                Domoticz.Log(f"Derived redirect bridge base: {self.bridge_https_base}")
             except Exception as e:  # pragma: no cover
-                Domoticz.Error(f"Failed to derive HTTPS redirect bridge base automatically: {e}")
+                Domoticz.Error(f"Failed to derive redirect bridge base automatically: {e}")
         self.redirect_bridge_map: Dict[str, Dict[str, Any]] = {}  # state -> {redirect, ts}
         self.redirect_bridge_ttl = 600  # seconds
         self.recent_auth_codes: List[Dict[str, Any]] = []  # track last few codes for inspection
