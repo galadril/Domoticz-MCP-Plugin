@@ -142,26 +142,41 @@ class DomoticzMCPServer:
             auth_ep = self.domoticz_oauth_client.oauth_config.get('authorization_endpoint')
             if not auth_ep:
                 return web.json_response({"error": "authorization_endpoint missing"}, status=500)
+
             qp = dict(request.rel_url.query)
             try:
                 orig_redirect = qp.get('redirect_uri')
                 if (self.redirect_bridge_enabled and self.external_bridge_base and orig_redirect and
                         orig_redirect.startswith(('http://127.0.0.1', 'http://localhost')) and
                         not orig_redirect.startswith('https://')):
+
+                    # new: try to preserve port from resource param
+                    bridge_base = self.external_bridge_base.rstrip('/')
+                    resource = qp.get("resource")
+                    if resource:
+                        from urllib.parse import urlparse
+                        parsed = urlparse(resource)
+                        if parsed.port:
+                            # inject port into external bridge if missing
+                            if ":" not in bridge_base.split("]")[-1]:  # crude check for existing port
+                                bridge_base += f":{parsed.port}"
+
                     state = qp.get('state') or f"st_{int(time.time()*1000)}"
                     qp['state'] = state
                     self._purge_redirect_bridge()
                     self.redirect_bridge_map[state] = {"redirect": orig_redirect, "ts": time.time()}
-                    qp['redirect_uri'] = f"{self.external_bridge_base.rstrip('/')}/redirect_bridge"
+                    qp['redirect_uri'] = f"{bridge_base}/redirect_bridge"
                     Domoticz.Log(f"Redirect bridge engaged state={state} orig={orig_redirect} via={qp['redirect_uri']}")
                 elif self.force_https_bridge and orig_redirect and orig_redirect.startswith('http://'):
                     Domoticz.Error("HTTPS redirect required but could not rewrite (missing external_bridge_base)")
                     return web.json_response({"error": "HTTPS redirect required but bridge not configured"}, status=500)
             except Exception as e:  # pragma: no cover
                 Domoticz.Error(f"Redirect bridge setup failed: {e}")
+
             if 'client_secret' in qp:
                 Domoticz.Log("Stripping client_secret from /authorize request")
                 qp.pop('client_secret')
+
             target = auth_ep + ('?' + urllib.parse.urlencode(qp) if qp else '')
             Domoticz.Log(f"Proxy /authorize -> {target}")
             raise web.HTTPFound(location=target)
@@ -170,6 +185,7 @@ class DomoticzMCPServer:
         except Exception as e:
             Domoticz.Error(f"/authorize proxy error: {e}")
             return web.json_response({"error": str(e)}, status=500)
+
 
     async def redirect_bridge_handler(self, request: web_request.Request):
         try:
