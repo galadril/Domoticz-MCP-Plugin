@@ -41,49 +41,40 @@ class DomoticzMCPServer:
         self.domoticz_oauth_client = domoticz_oauth_client
 
         # ---- Redirect bridge configuration --------------------------------
-        # Domoticz apparently enforces that redirect_uri must be HTTPS. The client (VS / local tool)
-        # wants to use a loopback http://127.0.0.1:<port>/callback. We therefore:
-        # 1. Intercept /authorize requests containing a loopback http redirect_uri.
-        # 2. Store the original loopback URI keyed by state.
-        # 3. Replace redirect_uri sent to Domoticz with an HTTPS bridge endpoint (external_base + /redirect_bridge).
-        # 4. When Domoticz calls back to /redirect_bridge we forward (302) the code to the original loopback http URI.
-        # You must ensure the HTTPS external base actually resolves & serves /redirect_bridge.
-        # If this Python server itself does not terminate TLS, place a reverse proxy (nginx, caddy, traefik)
-        # in front that forwards /redirect_bridge to this server (http://<host>:8765/redirect_bridge).
+        # Domoticz enforces HTTPS redirect_uri. Local client (loopback) uses http://127.0.0.1:<port>/callback.
+        # Strategy: intercept loopback HTTP redirect, store original, swap to HTTPS bridge, later forward.
         self.redirect_bridge_enabled = True
-        # Allow environment override (e.g. https://myhost.example.com or https://192.168.1.25)
-        self.external_bridge_base = os.environ.get('REDIRECT_BRIDGE_EXTERNAL_BASE')  # full base WITHOUT trailing slash
-        # Force using HTTPS when constructing a derived base (default True to satisfy Domoticz validation)
+        self.debug_bridge_page = False  # set True for intermediate HTML page
+        self.log_full_code = True       # logs full authorization codes (security trade-off)
         self.force_https_bridge = os.environ.get('FORCE_HTTPS_BRIDGE', '1') not in ('0', 'false', 'False')
-        self.debug_bridge_page = False  # set True if you want an intermediate inspection page instead of immediate 302
-        self.log_full_code = True       # always log full code (security trade-off)
-
+        self.external_bridge_base = os.environ.get('REDIRECT_BRIDGE_EXTERNAL_BASE')  # e.g. https://your.host.name
         if self.redirect_bridge_enabled and not self.external_bridge_base:
             try:
-                # Derive host from Domoticz base URL if available, else hostname env, else localhost
+                # Derive host from Domoticz base URL, else HOSTNAME env, else localhost
                 domo_host = None
                 if self.domoticz_oauth_client and getattr(self.domoticz_oauth_client, 'domoticz_base_url', None):
                     p = urllib.parse.urlparse(self.domoticz_oauth_client.domoticz_base_url)
                     domo_host = p.hostname
                 if not domo_host:
                     domo_host = os.environ.get('HOSTNAME') or 'localhost'
-                scheme = 'https' if self.force_https_bridge else 'http'
-                # When forcing https we usually want the standard port and rely on reverse proxy, so omit port.
-                # If user wants a non-standard port they should set REDIRECT_BRIDGE_EXTERNAL_BASE explicitly.
-                if scheme == 'https':
-                    derived = f"https://{domo_host}"  # no port -> 443
+                if self.force_https_bridge:
+                    # Assume reverse proxy terminating TLS on :443
+                    self.external_bridge_base = f"https://{domo_host}"
+                    Domoticz.Log("Redirect bridge derived HTTPS base (expect reverse proxy): " + self.external_bridge_base)
                 else:
-                    derived = f"http://{domo_host}:{self.port}" if self.port not in (80,) else f"http://{domo_host}"
-                self.external_bridge_base = derived
-                Domoticz.Log(f"Derived redirect bridge external base: {self.external_bridge_base} (force_https={self.force_https_bridge})")
-                if scheme == 'https':
-                    Domoticz.Log("NOTE: Ensure an HTTPS listener / reverse proxy forwards /redirect_bridge -> plugin HTTP port")
+                    # Use direct plugin port over HTTP
+                    port_part = f":{self.port}" if self.port not in (80,) else ''
+                    self.external_bridge_base = f"http://{domo_host}{port_part}"
+                    Domoticz.Log("Redirect bridge derived HTTP base: " + self.external_bridge_base)
             except Exception as e:  # pragma: no cover
-                Domoticz.Error(f"Failed to derive redirect bridge base automatically: {e}")
+                Domoticz.Error(f"Failed to derive redirect bridge base: {e}")
+        if self.force_https_bridge:
+            Domoticz.Log("NOTE: Ensure external HTTPS forwards /redirect_bridge -> plugin (http://<host>:%d/redirect_bridge)" % self.port)
 
-        self.redirect_bridge_map: Dict[str, Dict[str, Any]] = {}  # state -> {redirect, ts}
+        # Mapping state -> original loopback redirect + timestamp
+        self.redirect_bridge_map: Dict[str, Dict[str, Any]] = {}
         self.redirect_bridge_ttl = 600  # seconds
-        self.recent_auth_codes: List[Dict[str, Any]] = []  # track last few codes
+        self.recent_auth_codes: List[Dict[str, Any]] = []
         self.recent_codes_limit = 20
 
         if AIOHTTP_AVAILABLE:
@@ -150,19 +141,18 @@ class DomoticzMCPServer:
             if not auth_ep:
                 return web.json_response({"error": "authorization_endpoint missing"}, status=500)
             qp = dict(request.rel_url.query)
-            # Bridge logic
+            # Bridge logic: swap loopback http redirect for external https bridge
             try:
                 orig_redirect = qp.get('redirect_uri')
                 if (self.redirect_bridge_enabled and self.external_bridge_base and orig_redirect and
                         orig_redirect.startswith(('http://127.0.0.1', 'http://localhost')) and
                         not orig_redirect.startswith('https://')):
-                    # Force HTTPS bridge for Domoticz compliance
                     state = qp.get('state') or f"st_{int(time.time()*1000)}"
                     qp['state'] = state
                     self._purge_redirect_bridge()
                     self.redirect_bridge_map[state] = {"redirect": orig_redirect, "ts": time.time()}
                     qp['redirect_uri'] = f"{self.external_bridge_base.rstrip('/')}/redirect_bridge"
-                    Domoticz.Log(f"Redirect bridge (force HTTPS) engaged state={state} orig={orig_redirect} via={qp['redirect_uri']}")
+                    Domoticz.Log(f"Redirect bridge engaged state={state} orig={orig_redirect} via={qp['redirect_uri']}")
             except Exception as e:  # pragma: no cover
                 Domoticz.Error(f"Redirect bridge setup failed: {e}")
             if 'client_secret' in qp:
