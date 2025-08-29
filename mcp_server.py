@@ -275,7 +275,7 @@ class DomoticzMCPServer:
                 start = time.time()
                 result = await self.execute_domoticz_tool(tool_name, arguments, access_token)
                 Domoticz.Debug(f"tools/call done name={tool_name} elapsed={time.time()-start:.3f}s")
-                resp = {"jsonrpc": "2.0", "id": request_id, "result": {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}}}
+                resp = {"jsonrpc": "2.0", "id": request_id, "result": {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}}
             elif method == 'logging/setLevel':
                 level = params.get('level', 'info')
                 Domoticz.Log(f"Log level set to: {level}")
