@@ -87,9 +87,6 @@ class DomoticzMCPServer:
         self.recent_auth_codes: List[Dict[str, Any]] = []
         self.recent_codes_limit = 20
 
-        # Active SSE connections
-        self.active_connections: List[Dict[str, Any]] = []
-
         if AIOHTTP_AVAILABLE:
             self.app = web.Application()
             self.setup_routes()
@@ -112,9 +109,7 @@ class DomoticzMCPServer:
         if not AIOHTTP_AVAILABLE:
             return
         try:
-            # MCP SSE endpoint
-            self.app.router.add_get('/sse', self.handle_sse_connection)
-            # Legacy JSON-RPC endpoint (deprecated but kept for compatibility)
+            # Legacy JSON-RPC endpoint (primary endpoint for VS2022 and other clients)
             self.app.router.add_post('/mcp', self.handle_mcp_request)
             # OAuth discovery endpoints (RFC 9728 & RFC 8414)
             self.app.router.add_get('/.well-known/oauth-protected-resource', self.oauth_protected_resource_metadata)
@@ -128,7 +123,7 @@ class DomoticzMCPServer:
             # Redirect bridge
             self.app.router.add_get('/redirect_bridge', self.redirect_bridge_handler)
             self.app.router.add_get('/last_auth_codes', self.last_auth_codes_handler)
-            Domoticz.Debug("Routes registered (/.well-known/oauth-*,/sse,/mcp,/health,/info,/authorize,/token,/redirect_bridge,/last_auth_codes)")
+            Domoticz.Debug("Routes registered (/.well-known/oauth-*,/mcp,/health,/info,/authorize,/token,/redirect_bridge,/last_auth_codes)")
         except Exception as e:
             Domoticz.Error(f"Error setting up routes: {e}")
 
@@ -248,19 +243,36 @@ class DomoticzMCPServer:
             return web.json_response({"error": str(e)}, status=500)
 
     async def server_info(self, request: web_request.Request):
+        # Determine reachable hostname
+        mcp_host = self.host
+        if mcp_host == "0.0.0.0":
+            if self.domoticz_oauth_client and self.domoticz_oauth_client.domoticz_base_url:
+                p = urllib.parse.urlparse(self.domoticz_oauth_client.domoticz_base_url)
+                mcp_host = p.hostname or 'localhost'
+            else:
+                mcp_host = 'localhost'
+        
         info = {
             "service": "Domoticz MCP Server",
             "version": "2.0.0",
-            "protocol": "MCP 2025-06-18",
+            "protocol": "MCP 2025-06-18 (JSON-RPC)",
             "mcp_sdk_available": MCP_SDK_AVAILABLE,
             "aiohttp_available": AIOHTTP_AVAILABLE,
-            "capabilities": {"tools": True, "logging": True},
+            "capabilities": {
+                "tools": True,
+                "logging": True,
+                "oauth2": {
+                    "authorizationUrl": f"http://{mcp_host}:{self.port}/authorize",
+                    "tokenUrl": f"http://{mcp_host}:{self.port}/token",
+                    "scopes": []
+                }
+            },
             "authentication_model": "oauth_2_1",
             "description": "MCP 2025-06-18 compliant server for Domoticz with OAuth authentication",
             "endpoints": {
-                "sse": f"http://{self.host}:{self.port}/sse",
-                "authorize": f"http://{self.host}:{self.port}/authorize",
-                "token": f"http://{self.host}:{self.port}/token"
+                "mcp": f"http://{mcp_host}:{self.port}/mcp",
+                "authorize": f"http://{mcp_host}:{self.port}/authorize",
+                "token": f"http://{mcp_host}:{self.port}/token"
             }
         }
         if self.domoticz_oauth_client:
@@ -274,100 +286,6 @@ class DomoticzMCPServer:
                 except Exception as e:  # pragma: no cover
                     Domoticz.Log(f"Warning: OIDC fetch failed: {e}")
         return web.json_response(info)
-
-    async def handle_sse_connection(self, request: web_request.Request):
-        """Main SSE endpoint for MCP protocol communication"""
-        try:
-            Domoticz.Log("New SSE connection attempt")
-            
-            # Check for authorization header
-            auth_header = request.headers.get('Authorization')
-            access_token = None
-            
-            if auth_header and auth_header.startswith('Bearer '):
-                access_token = auth_header[7:]
-                Domoticz.Debug("SSE connection with Bearer token")
-            else:
-                # No authorization - return 401 with WWW-Authenticate per RFC 9728
-                Domoticz.Log("SSE connection without authentication - returning 401 with OAuth discovery")
-                
-                # Determine reachable hostname for MCP server
-                mcp_host = self.host
-                if mcp_host == "0.0.0.0":
-                    # Extract hostname from Domoticz URL
-                    if self.domoticz_oauth_client and self.domoticz_oauth_client.domoticz_base_url:
-                        p = urllib.parse.urlparse(self.domoticz_oauth_client.domoticz_base_url)
-                        mcp_host = p.hostname or 'localhost'
-                    else:
-                        mcp_host = 'localhost'
-                
-                # Resource metadata URL points to THIS MCP server
-                resource_metadata_url = f"http://{mcp_host}:{self.port}/.well-known/oauth-protected-resource"
-                
-                return web.Response(
-                    status=401,
-                    text="Authorization required",
-                    headers={
-                        'WWW-Authenticate': f'Bearer realm="Domoticz MCP", resource_metadata="{resource_metadata_url}"',
-                        'Content-Type': 'text/plain'
-                    }
-                )
-
-            response = web.StreamResponse()
-            response.headers['Content-Type'] = 'text/event-stream'
-            response.headers['Cache-Control'] = 'no-cache'
-            response.headers['Connection'] = 'keep-alive'
-            response.headers['X-Accel-Buffering'] = 'no'
-            await response.prepare(request)
-
-            connection_info = {
-                'response': response,
-                'access_token': access_token,
-                'connected_at': time.time()
-            }
-            self.active_connections.append(connection_info)
-            Domoticz.Log(f"SSE connection established (total: {len(self.active_connections)})")
-
-            try:
-                # Send initial endpoint event per MCP spec
-                endpoint_event = {
-                    "jsonrpc": "2.0",
-                    "method": "notifications/endpoint",
-                    "params": {
-                        "endpoint": f"http://{self.host}:{self.port}/sse"
-                    }
-                }
-                await self._send_sse_message(response, endpoint_event)
-
-                # Keep connection alive and handle incoming messages
-                while True:
-                    # In a real implementation, you'd read from request.content
-                    # For now, just keep alive
-                    await asyncio.sleep(30)
-                    # Send ping to keep connection alive
-                    await response.write(b': ping\n\n')
-                    
-            except asyncio.CancelledError:
-                Domoticz.Debug("SSE connection cancelled")
-                raise
-            except Exception as e:
-                Domoticz.Error(f"Error in SSE connection: {e}")
-            finally:
-                if connection_info in self.active_connections:
-                    self.active_connections.remove(connection_info)
-                Domoticz.Log(f"SSE connection closed (remaining: {len(self.active_connections)})")
-
-        except Exception as e:
-            Domoticz.Error(f"Error establishing SSE connection: {e}")
-            return web.Response(text=f"Error: {e}", status=500)
-
-    async def _send_sse_message(self, response: web.StreamResponse, message: dict):
-        """Send a JSON-RPC message over SSE"""
-        try:
-            data = json.dumps(message)
-            await response.write(f"data: {data}\n\n".encode('utf-8'))
-        except Exception as e:
-            Domoticz.Error(f"Error sending SSE message: {e}")
 
     async def proxy_authorize(self, request: web_request.Request):
         try:
@@ -640,9 +558,8 @@ class DomoticzMCPServer:
             Domoticz.Log(f"Domoticz MCP Server v2.0.0 started on http://{self.host}:{self.port}")
             Domoticz.Log(f"Health check: http://{self.host}:{self.port}/health")
             Domoticz.Log(f"Server info: http://{self.host}:{self.port}/info")
-            Domoticz.Log(f"SSE endpoint: http://{self.host}:{self.port}/sse")
-            Domoticz.Log(f"MCP endpoint (legacy): http://{self.host}:{self.port}/mcp")
-            Domoticz.Log(f"Protocol: MCP 2025-06-18 compliant")
+            Domoticz.Log(f"MCP endpoint: http://{self.host}:{self.port}/mcp")
+            Domoticz.Log(f"Protocol: MCP 2025-06-18 (JSON-RPC)")
             Domoticz.Log(f"Authentication: OAuth 2.1 passthrough mode")
             if self.force_https_bridge:
                 Domoticz.Log("Redirect bridge expects external HTTPS at: " + self.external_bridge_base.rstrip('/') + "/redirect_bridge")
