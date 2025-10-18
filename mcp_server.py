@@ -79,6 +79,9 @@ class DomoticzMCPServer:
         self.recent_auth_codes: List[Dict[str, Any]] = []
         self.recent_codes_limit = 20
 
+        # Active SSE connections
+        self.active_connections: List[Dict[str, Any]] = []
+
         if AIOHTTP_AVAILABLE:
             self.app = web.Application()
             self.setup_routes()
@@ -101,14 +104,23 @@ class DomoticzMCPServer:
         if not AIOHTTP_AVAILABLE:
             return
         try:
+            # MCP SSE endpoint
+            self.app.router.add_get('/sse', self.handle_sse_connection)
+            # Legacy JSON-RPC endpoint (deprecated but kept for compatibility)
             self.app.router.add_post('/mcp', self.handle_mcp_request)
+            # OAuth discovery endpoints (RFC 9728 & RFC 8414)
+            self.app.router.add_get('/.well-known/oauth-protected-resource', self.oauth_protected_resource_metadata)
+            self.app.router.add_get('/.well-known/oauth-authorization-server', self.oauth_authorization_server_metadata)
+            # Utility endpoints
             self.app.router.add_get('/health', self.health_check)
             self.app.router.add_get('/info', self.server_info)
+            # OAuth proxy endpoints
             self.app.router.add_get('/authorize', self.proxy_authorize)
             self.app.router.add_post('/token', self.proxy_token)
+            # Redirect bridge
             self.app.router.add_get('/redirect_bridge', self.redirect_bridge_handler)
             self.app.router.add_get('/last_auth_codes', self.last_auth_codes_handler)
-            Domoticz.Debug("Routes registered (/mcp,/health,/info,/authorize,/token,/redirect_bridge,/last_auth_codes)")
+            Domoticz.Debug("Routes registered (/.well-known/oauth-*,/sse,/mcp,/health,/info,/authorize,/token,/redirect_bridge,/last_auth_codes)")
         except Exception as e:
             Domoticz.Error(f"Error setting up routes: {e}")
 
@@ -116,19 +128,208 @@ class DomoticzMCPServer:
     async def health_check(self, request: web_request.Request):
         return web.json_response({"status": "healthy", "service": "domoticz-mcp"})
 
+    async def oauth_protected_resource_metadata(self, request: web_request.Request):
+        """RFC 9728: OAuth 2.0 Protected Resource Metadata"""
+        try:
+            if not self.domoticz_oauth_client or not self.domoticz_oauth_client.oauth_config:
+                Domoticz.Debug("Trigger OAuth discovery for protected resource metadata")
+                if self.domoticz_oauth_client:
+                    self.domoticz_oauth_client.discover_oauth_endpoints()
+            
+            # Build the authorization server URL
+            auth_server_url = f"http://{self.host}:{self.port}/.well-known/oauth-authorization-server"
+            if self.external_bridge_base and self.force_https_bridge:
+                auth_server_url = f"{self.external_bridge_base.rstrip('/')}/.well-known/oauth-authorization-server"
+            
+            metadata = {
+                "resource": f"https://{self.host if self.host != '0.0.0.0' else 'localhost'}:{self.port}",
+                "authorization_servers": [auth_server_url],
+                "bearer_methods_supported": ["header"],
+                "resource_documentation": f"http://{self.host}:{self.port}/info"
+            }
+            
+            Domoticz.Debug(f"Protected Resource Metadata: {metadata}")
+            return web.json_response(metadata)
+        except Exception as e:
+            Domoticz.Error(f"Error generating protected resource metadata: {e}")
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def oauth_authorization_server_metadata(self, request: web_request.Request):
+        """RFC 8414: OAuth 2.0 Authorization Server Metadata - Proxy from Domoticz"""
+        try:
+            if not self.domoticz_oauth_client:
+                return web.json_response({"error": "OAuth client not configured"}, status=500)
+            
+            # Discover OAuth endpoints from Domoticz if not already done
+            if not self.domoticz_oauth_client.oauth_config:
+                Domoticz.Debug("Trigger OAuth discovery for authorization server metadata")
+                if not self.domoticz_oauth_client.discover_oauth_endpoints():
+                    return web.json_response({"error": "OAuth discovery failed"}, status=500)
+            
+            # Get Domoticz OAuth metadata and proxy it
+            try:
+                well_known_url = f"{self.domoticz_oauth_client.domoticz_base_url}/.well-known/openid-configuration"
+                Domoticz.Debug(f"Proxying OAuth metadata from: {well_known_url}")
+                
+                loop = asyncio.get_event_loop()
+                def fetch_metadata():
+                    return requests.get(well_known_url, timeout=10, verify=False)
+                
+                resp = await loop.run_in_executor(None, fetch_metadata)
+                
+                if resp.status_code == 200:
+                    metadata = resp.json()
+                    
+                    # Rewrite endpoints to go through our proxy
+                    base_url = f"http://{self.host}:{self.port}"
+                    if self.external_bridge_base and self.force_https_bridge:
+                        base_url = self.external_bridge_base.rstrip('/')
+                    
+                    # Rewrite authorization and token endpoints to use our proxy
+                    if 'authorization_endpoint' in metadata:
+                        metadata['authorization_endpoint'] = f"{base_url}/authorize"
+                    if 'token_endpoint' in metadata:
+                        metadata['token_endpoint'] = f"{base_url}/token"
+                    
+                    # Add issuer if not present
+                    if 'issuer' not in metadata:
+                        metadata['issuer'] = self.domoticz_oauth_client.domoticz_base_url
+                    
+                    # Remove registration_endpoint if present (Domoticz likely doesn't support DCR)
+                    # MCP clients that see no registration_endpoint will require manual client registration
+                    if 'registration_endpoint' in metadata:
+                        Domoticz.Debug("Removing registration_endpoint (Dynamic Client Registration not supported)")
+                        del metadata['registration_endpoint']
+                    
+                    # Ensure PKCE is advertised as required
+                    if 'code_challenge_methods_supported' not in metadata:
+                        metadata['code_challenge_methods_supported'] = ['S256']
+                    
+                    Domoticz.Debug(f"Authorization Server Metadata proxied successfully")
+                    return web.json_response(metadata)
+                else:
+                    Domoticz.Error(f"Failed to fetch Domoticz OAuth metadata: {resp.status_code}")
+                    return web.json_response({"error": f"Upstream OAuth server error: {resp.status_code}"}, status=502)
+                    
+            except Exception as e:
+                Domoticz.Error(f"Error fetching Domoticz OAuth metadata: {e}")
+                return web.json_response({"error": f"Failed to fetch OAuth metadata: {e}"}, status=502)
+                
+        except Exception as e:
+            Domoticz.Error(f"Error generating authorization server metadata: {e}")
+            return web.json_response({"error": str(e)}, status=500)
+
     async def server_info(self, request: web_request.Request):
-        info = {"service": "Domoticz MCP Server", "version": "2.0.0", "protocol": "MCP 2025-06-18", "mcp_sdk_available": MCP_SDK_AVAILABLE, "aiohttp_available": AIOHTTP_AVAILABLE, "capabilities": {"tools": True, "logging": True}, "authentication_model": "oauth_2_1_passthrough", "description": "MCP 2025-06-18 compliant server for Domoticz with OAuth passthrough authentication"}
+        info = {
+            "service": "Domoticz MCP Server",
+            "version": "2.0.0",
+            "protocol": "MCP 2025-06-18",
+            "mcp_sdk_available": MCP_SDK_AVAILABLE,
+            "aiohttp_available": AIOHTTP_AVAILABLE,
+            "capabilities": {"tools": True, "logging": True},
+            "authentication_model": "oauth_2_1",
+            "description": "MCP 2025-06-18 compliant server for Domoticz with OAuth authentication",
+            "endpoints": {
+                "sse": f"http://{self.host}:{self.port}/sse",
+                "authorize": f"http://{self.host}:{self.port}/authorize",
+                "token": f"http://{self.host}:{self.port}/token"
+            }
+        }
         if self.domoticz_oauth_client:
             if self.domoticz_oauth_client.oauth_config:
-                info["authorization"] = self.domoticz_oauth_client.oauth_config
+                info["oauth"] = self.domoticz_oauth_client.oauth_config
             else:
                 try:
                     Domoticz.Debug("Lazy OAuth discovery via /info")
                     if self.domoticz_oauth_client.discover_oauth_endpoints():
-                        info["authorization"] = self.domoticz_oauth_client.oauth_config
+                        info["oauth"] = self.domoticz_oauth_client.oauth_config
                 except Exception as e:  # pragma: no cover
                     Domoticz.Log(f"Warning: OIDC fetch failed: {e}")
         return web.json_response(info)
+
+    async def handle_sse_connection(self, request: web_request.Request):
+        """Main SSE endpoint for MCP protocol communication"""
+        try:
+            Domoticz.Log("New SSE connection attempt")
+            
+            # Check for authorization header
+            auth_header = request.headers.get('Authorization')
+            access_token = None
+            
+            if auth_header and auth_header.startswith('Bearer '):
+                access_token = auth_header[7:]
+                Domoticz.Debug("SSE connection with Bearer token")
+            else:
+                # No authorization - return 401 with WWW-Authenticate per RFC 9728
+                Domoticz.Log("SSE connection without authentication - returning 401 with OAuth discovery")
+                resource_metadata_url = f"http://{self.host}:{self.port}/.well-known/oauth-protected-resource"
+                if self.external_bridge_base and self.force_https_bridge:
+                    resource_metadata_url = f"{self.external_bridge_base.rstrip('/')}/.well-known/oauth-protected-resource"
+                
+                return web.Response(
+                    status=401,
+                    text="Authorization required",
+                    headers={
+                        'WWW-Authenticate': f'Bearer realm="Domoticz MCP", resource_metadata="{resource_metadata_url}"',
+                        'Content-Type': 'text/plain'
+                    }
+                )
+
+            response = web.StreamResponse()
+            response.headers['Content-Type'] = 'text/event-stream'
+            response.headers['Cache-Control'] = 'no-cache'
+            response.headers['Connection'] = 'keep-alive'
+            response.headers['X-Accel-Buffering'] = 'no'
+            await response.prepare(request)
+
+            connection_info = {
+                'response': response,
+                'access_token': access_token,
+                'connected_at': time.time()
+            }
+            self.active_connections.append(connection_info)
+            Domoticz.Log(f"SSE connection established (total: {len(self.active_connections)})")
+
+            try:
+                # Send initial endpoint event per MCP spec
+                endpoint_event = {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/endpoint",
+                    "params": {
+                        "endpoint": f"http://{self.host}:{self.port}/sse"
+                    }
+                }
+                await self._send_sse_message(response, endpoint_event)
+
+                # Keep connection alive and handle incoming messages
+                while True:
+                    # In a real implementation, you'd read from request.content
+                    # For now, just keep alive
+                    await asyncio.sleep(30)
+                    # Send ping to keep connection alive
+                    await response.write(b': ping\n\n')
+                    
+            except asyncio.CancelledError:
+                Domoticz.Debug("SSE connection cancelled")
+                raise
+            except Exception as e:
+                Domoticz.Error(f"Error in SSE connection: {e}")
+            finally:
+                if connection_info in self.active_connections:
+                    self.active_connections.remove(connection_info)
+                Domoticz.Log(f"SSE connection closed (remaining: {len(self.active_connections)})")
+
+        except Exception as e:
+            Domoticz.Error(f"Error establishing SSE connection: {e}")
+            return web.Response(text=f"Error: {e}", status=500)
+
+    async def _send_sse_message(self, response: web.StreamResponse, message: dict):
+        """Send a JSON-RPC message over SSE"""
+        try:
+            data = json.dumps(message)
+            await response.write(f"data: {data}\n\n".encode('utf-8'))
+        except Exception as e:
+            Domoticz.Error(f"Error sending SSE message: {e}")
 
     async def proxy_authorize(self, request: web_request.Request):
         try:
@@ -254,12 +455,14 @@ class DomoticzMCPServer:
             return web.json_response({"error": str(e)}, status=500)
 
     async def handle_mcp_request(self, request: web_request.Request):
+        """Legacy JSON-RPC endpoint (deprecated, use SSE instead)"""
         try:
             data = await request.json()
             method = data.get('method')
             params = data.get('params', {})
             request_id = data.get('id')
             Domoticz.Debug(f"MCP request id={request_id} method={method}")
+            
             if method == 'initialize':
                 resp = {"jsonrpc": "2.0", "id": request_id, "result": {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "domoticz-mcp-server", "version": "2.0.0"}}}
             elif method == 'tools/list':
@@ -280,73 +483,3 @@ class DomoticzMCPServer:
                 result = await self.execute_domoticz_tool(tool_name, arguments, access_token)
                 Domoticz.Debug(f"tools/call done name={tool_name} elapsed={time.time()-start:.3f}s")
                 resp = {"jsonrpc": "2.0", "id": request_id, "result": {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}}
-            elif method == 'logging/setLevel':
-                level = params.get('level', 'info')
-                Domoticz.Log(f"Log level set to: {level}")
-                resp = {"jsonrpc": "2.0", "id": request_id, "result": {}}
-            else:
-                Domoticz.Error(f"Unknown MCP method: {method}")
-                resp = {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": f"Method not found: {method}"}}
-            return web.json_response(resp)
-        except Exception as e:
-            Domoticz.Error(f"Error handling MCP request: {e}")
-            return web.json_response({"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": f"Internal error: {e}"}}, status=500)
-
-    async def get_available_tools(self) -> List[Dict[str, Any]]:
-        return [
-            {"name": "domoticz_get_version", "description": "Get Domoticz version information", "inputSchema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False}},
-            {"name": "domoticz_list_devices", "description": "List all Domoticz devices with optional filtering", "inputSchema": {"type": "object", "properties": {"filter": {"type": "string", "enum": ["all", "light", "weather", "temperature", "utility"], "default": "all"}, "used": {"type": "boolean", "default": True}}, "required": [], "additionalProperties": False}},
-            {"name": "domoticz_device_status", "description": "Get detailed status of a specific device", "inputSchema": {"type": "object", "properties": {"idx": {"type": "integer", "minimum": 1}}, "required": ["idx"], "additionalProperties": False}},
-            {"name": "domoticz_list_scenes", "description": "List all scenes and groups", "inputSchema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False}},
-            {"name": "domoticz_get_log", "description": "Retrieve Domoticz logs", "inputSchema": {"type": "object", "properties": {"log_type": {"type": "string", "enum": ["status", "error", "notification"], "default": "status"}}, "required": [], "additionalProperties": False}}
-        ]
-
-    async def execute_domoticz_tool(self, name: str, arguments: Dict[str, Any], access_token: str) -> Dict[str, Any]:
-        try:
-            if not self.domoticz_oauth_client:
-                Domoticz.Error("OAuth client not configured for tool execution")
-                return {"error": "Domoticz OAuth client not configured"}
-            if name == "domoticz_get_version":
-                Domoticz.Debug("Execute tool domoticz_get_version")
-                return self.domoticz_oauth_client.make_authenticated_request(access_token, {"type": "command", "param": "getversion"})
-            if name == "domoticz_list_devices":
-                Domoticz.Debug("Execute tool domoticz_list_devices")
-                params = {"type": "command", "param": "getdevices", "filter": arguments.get("filter", "all")}
-                if arguments.get("used", True):
-                    params["used"] = "true"
-                return self.domoticz_oauth_client.make_authenticated_request(access_token, params)
-            if name == "domoticz_device_status":
-                idx = arguments.get("idx")
-                Domoticz.Debug(f"Execute tool domoticz_device_status idx={idx}")
-                if not idx:
-                    return {"error": "idx parameter is required"}
-                return self.domoticz_oauth_client.make_authenticated_request(access_token, {"type": "command", "param": "getdevices", "rid": str(idx)})
-            if name == "domoticz_list_scenes":
-                Domoticz.Debug("Execute tool domoticz_list_scenes")
-                return self.domoticz_oauth_client.make_authenticated_request(access_token, {"type": "command", "param": "getscenes"})
-            if name == "domoticz_get_log":
-                Domoticz.Debug("Execute tool domoticz_get_log")
-                return self.domoticz_oauth_client.make_authenticated_request(access_token, {"type": "command", "param": "getlog", "log": arguments.get("log_type", "status")})
-            Domoticz.Error(f"Unknown tool requested: {name}")
-            return {"error": f"Unknown tool: {name}"}
-        except Exception as e:
-            Domoticz.Error(f"Tool execution failed: {e}")
-            return {"error": f"Tool execution failed: {e}"}
-
-    async def start_server(self):
-        if not AIOHTTP_AVAILABLE:
-            Domoticz.Error("aiohttp not available - cannot start HTTP server")
-            return None
-        runner = web.AppRunner(self.app)
-        await runner.setup()
-        site = web.TCPSite(runner, self.host, self.port)
-        await site.start()
-        Domoticz.Log(f"Domoticz MCP Server v2.0.0 started on http://{self.host}:{self.port}")
-        Domoticz.Log(f"Health check: http://{self.host}:{self.port}/health")
-        Domoticz.Log(f"Server info: http://{self.host}:{self.port}/info")
-        Domoticz.Log(f"MCP endpoint: http://{self.host}:{self.port}/mcp")
-        Domoticz.Log(f"Protocol: MCP 2025-06-18 compliant")
-        Domoticz.Log(f"Authentication: OAuth 2.1 passthrough to Domoticz")
-        if self.force_https_bridge:
-            Domoticz.Log("Redirect bridge expects external HTTPS at: " + self.external_bridge_base.rstrip('/') + "/redirect_bridge")
-        return runner

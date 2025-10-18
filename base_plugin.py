@@ -49,14 +49,34 @@ class BasePlugin:
                     self.health_check_interval = 30
             self.auto_start_server = parameters.get("Mode1", "true") == "true"
             Domoticz.Log(f"Auto start server is {'enabled' if self.auto_start_server else 'disabled'} (Mode1={parameters.get('Mode1')})")
+            
+            # Domoticz URL
             self.default_domoticz_url = str(parameters.get("Mode3", "")).strip()
             Domoticz.Log(f"Domoticz URL override: {self.default_domoticz_url}" if self.default_domoticz_url else "Using default Domoticz URL: http://127.0.0.1:8080")
             domoticz_base_url = self.default_domoticz_url if self.default_domoticz_url else "http://127.0.0.1:8080"
-            self.domoticz_oauth_client = DomoticzOAuthClient(domoticz_base_url)
+            
+            # OAuth client credentials for plugin to authenticate to Domoticz
+            oauth_client_id = str(parameters.get("Mode4", "")).strip()
+            oauth_client_secret = str(parameters.get("Mode5", "")).strip()
+            
+            if oauth_client_id and oauth_client_secret:
+                Domoticz.Log(f"OAuth client credentials configured (Client ID: {oauth_client_id[:8]}...)")
+                Domoticz.Log("Plugin will use client credentials flow to authenticate to Domoticz")
+            else:
+                Domoticz.Log("No OAuth client credentials configured - plugin will use passthrough mode")
+                Domoticz.Log("WARNING: Passthrough mode violates MCP security spec - configure client credentials in Mode4/Mode5")
+            
+            self.domoticz_oauth_client = DomoticzOAuthClient(
+                domoticz_base_url,
+                client_id=oauth_client_id if oauth_client_id else None,
+                client_secret=oauth_client_secret if oauth_client_secret else None
+            )
+            
             if self.domoticz_oauth_client.discover_oauth_endpoints():
                 Domoticz.Log("Domoticz OAuth endpoints discovered successfully")
             else:
                 Domoticz.Error("Failed to discover Domoticz OAuth endpoints - OAuth features may not work")
+            
             debug_level = parameters.get("Mode6", "0")
             Domoticz.Debugging(int(debug_level))
         except Exception as e:
