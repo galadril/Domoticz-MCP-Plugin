@@ -144,17 +144,27 @@ class DomoticzMCPServer:
                 if self.domoticz_oauth_client:
                     self.domoticz_oauth_client.discover_oauth_endpoints()
             
+            # Determine reachable hostname for MCP server
+            mcp_host = self.host
+            if mcp_host == "0.0.0.0":
+                # Extract hostname from Domoticz URL
+                if self.domoticz_oauth_client and self.domoticz_oauth_client.domoticz_base_url:
+                    p = urllib.parse.urlparse(self.domoticz_oauth_client.domoticz_base_url)
+                    mcp_host = p.hostname or 'localhost'
+                else:
+                    mcp_host = 'localhost'
+            
             # Authorization server URL points to THIS MCP server where OAuth metadata is exposed
-            auth_server_url = f"http://{self.host}:{self.port}/.well-known/oauth-authorization-server"
+            auth_server_url = f"http://{mcp_host}:{self.port}/.well-known/oauth-authorization-server"
             
             # Resource URL also points to THIS MCP server
-            resource_url = f"http://{self.host if self.host != '0.0.0.0' else 'localhost'}:{self.port}"
+            resource_url = f"http://{mcp_host}:{self.port}"
             
             metadata = {
                 "resource": resource_url,
                 "authorization_servers": [auth_server_url],
                 "bearer_methods_supported": ["header"],
-                "resource_documentation": f"http://{self.host}:{self.port}/info"
+                "resource_documentation": f"http://{mcp_host}:{self.port}/info"
             }
             
             Domoticz.Debug(f"Protected Resource Metadata: {metadata}")
@@ -191,9 +201,17 @@ class DomoticzMCPServer:
                     
                     # IMPORTANT: OAuth endpoints should point to THIS MCP server (port 8765)
                     # where the /authorize and /token PROXY endpoints are located.
-                    # The MCP server then proxies requests to Domoticz (port 8080).
-                    # Clients connect to MCP server, not directly to Domoticz.
-                    base_url = f"http://{self.host}:{self.port}"
+                    # Use the hostname from Domoticz URL (or request) so clients can reach us
+                    mcp_host = self.host
+                    if mcp_host == "0.0.0.0":
+                        # Extract hostname from Domoticz URL or use request host
+                        if self.domoticz_oauth_client and self.domoticz_oauth_client.domoticz_base_url:
+                            p = urllib.parse.urlparse(self.domoticz_oauth_client.domoticz_base_url)
+                            mcp_host = p.hostname or 'localhost'
+                        else:
+                            mcp_host = 'localhost'
+                    
+                    base_url = f"http://{mcp_host}:{self.port}"
                     
                     # Rewrite authorization and token endpoints to use our proxy
                     if 'authorization_endpoint' in metadata:
@@ -273,8 +291,18 @@ class DomoticzMCPServer:
                 # No authorization - return 401 with WWW-Authenticate per RFC 9728
                 Domoticz.Log("SSE connection without authentication - returning 401 with OAuth discovery")
                 
+                # Determine reachable hostname for MCP server
+                mcp_host = self.host
+                if mcp_host == "0.0.0.0":
+                    # Extract hostname from Domoticz URL
+                    if self.domoticz_oauth_client and self.domoticz_oauth_client.domoticz_base_url:
+                        p = urllib.parse.urlparse(self.domoticz_oauth_client.domoticz_base_url)
+                        mcp_host = p.hostname or 'localhost'
+                    else:
+                        mcp_host = 'localhost'
+                
                 # Resource metadata URL points to THIS MCP server
-                resource_metadata_url = f"http://{self.host}:{self.port}/.well-known/oauth-protected-resource"
+                resource_metadata_url = f"http://{mcp_host}:{self.port}/.well-known/oauth-protected-resource"
                 
                 return web.Response(
                     status=401,
