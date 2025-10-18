@@ -123,7 +123,9 @@ class DomoticzMCPServer:
             # Redirect bridge
             self.app.router.add_get('/redirect_bridge', self.redirect_bridge_handler)
             self.app.router.add_get('/last_auth_codes', self.last_auth_codes_handler)
-            Domoticz.Debug("Routes registered (/.well-known/oauth-*,/mcp,/health,/info,/authorize,/token,/redirect_bridge,/last_auth_codes)")
+            # Debug endpoint
+            self.app.router.add_get('/debug/redirect_bridge', self.debug_redirect_bridge_state)
+            Domoticz.Debug("Routes registered (/.well-known/oauth-*,/mcp,/health,/info,/authorize,/token,/redirect_bridge,/last_auth_codes,/debug/redirect_bridge)")
         except Exception as e:
             Domoticz.Error(f"Error setting up routes: {e}")
 
@@ -289,44 +291,85 @@ class DomoticzMCPServer:
 
     async def proxy_authorize(self, request: web_request.Request):
         try:
-            Domoticz.Debug(f"/authorize query={dict(request.rel_url.query)}")
+            qp = dict(request.rel_url.query)
+            Domoticz.Log(f"/authorize called with params: {self._log_safe_dict(qp)}")
+            
             if not self.domoticz_oauth_client:
                 return web.json_response({"error": "OAuth client not configured"}, status=500)
             if not self.domoticz_oauth_client.oauth_config:
                 Domoticz.Debug("Trigger discovery for /authorize")
                 if not self.domoticz_oauth_client.discover_oauth_endpoints():
                     return web.json_response({"error": "OAuth discovery failed"}, status=500)
+            
             auth_ep = self.domoticz_oauth_client.oauth_config.get('authorization_endpoint')
             if not auth_ep:
                 return web.json_response({"error": "authorization_endpoint missing"}, status=500)
-            qp = dict(request.rel_url.query)
+            
             try:
                 orig_redirect = qp.get('redirect_uri')
+                Domoticz.Log(f"Original redirect_uri from client: {orig_redirect}")
+                
                 if (self.redirect_bridge_enabled and self.external_bridge_base and orig_redirect and
                         orig_redirect.startswith(('http://127.0.0.1', 'http://localhost')) and
                         not orig_redirect.startswith('https://')):
                     state = qp.get('state') or f"st_{int(time.time()*1000)}"
                     qp['state'] = state
                     self._purge_redirect_bridge()
+                    
+                    # Store the original loopback redirect_uri so we can forward back to it
                     self.redirect_bridge_map[state] = {"redirect": orig_redirect, "ts": time.time()}
-                    qp['redirect_uri'] = f"{self.external_bridge_base.rstrip('/')}/redirect_bridge"
-                    Domoticz.Log(f"Redirect bridge engaged state={state} orig={orig_redirect} via={qp['redirect_uri']}")
+                    
+                    # Replace redirect_uri with our HTTPS bridge endpoint
+                    bridge_uri = f"{self.external_bridge_base.rstrip('/')}/redirect_bridge"
+                    qp['redirect_uri'] = bridge_uri
+                    
+                    Domoticz.Log(f"Redirect bridge engaged:")
+                    Domoticz.Log(f"  state={state}")
+                    Domoticz.Log(f"  original_loopback={orig_redirect}")
+                    Domoticz.Log(f"  bridge_endpoint={bridge_uri}")
+                    Domoticz.Log(f"Flow: Client -> Domoticz -> {bridge_uri} -> {orig_redirect}")
+                    
                 elif self.force_https_bridge and orig_redirect and orig_redirect.startswith('http://'):
                     Domoticz.Error("HTTPS redirect required but could not rewrite (missing external_bridge_base)")
                     return web.json_response({"error": "HTTPS redirect required but bridge not configured"}, status=500)
+                else:
+                    Domoticz.Log(f"Redirect bridge NOT engaged. Using direct redirect_uri: {orig_redirect}")
+                    
             except Exception as e:  # pragma: no cover
                 Domoticz.Error(f"Redirect bridge setup failed: {e}")
+                import traceback
+                Domoticz.Error(f"Traceback: {traceback.format_exc()}")
+            
             if 'client_secret' in qp:
                 Domoticz.Log("Stripping client_secret from /authorize request")
                 qp.pop('client_secret')
+            
             target = auth_ep + ('?' + urllib.parse.urlencode(qp) if qp else '')
-            Domoticz.Log(f"Proxy /authorize -> {target}")
+            Domoticz.Log(f"Proxying /authorize -> {target}")
             raise web.HTTPFound(location=target)
+            
         except web.HTTPException:
             raise
         except Exception as e:
             Domoticz.Error(f"/authorize proxy error: {e}")
+            import traceback
+            Domoticz.Error(f"Traceback: {traceback.format_exc()}")
             return web.json_response({"error": str(e)}, status=500)
+
+    def _log_safe_dict(self, data: dict) -> str:
+        """Helper to safely log dictionaries with sensitive data redacted"""
+        try:
+            if not isinstance(data, dict):
+                return str(data)
+            redacted = {}
+            for k, v in data.items():
+                if any(s in k.lower() for s in ["secret", "token", "code", "assertion", "password"]):
+                    redacted[k] = "***"
+                else:
+                    redacted[k] = v
+            return str(redacted)
+        except Exception:
+            return "<unable to render dict>"
 
     async def redirect_bridge_handler(self, request: web_request.Request):
         try:
@@ -335,10 +378,19 @@ class DomoticzMCPServer:
             error = params.get('error')
             state = params.get('state')
             Domoticz.Debug(f"/redirect_bridge hit state={state} code_present={bool(code)} error={error}")
+            
+            # Log the full request URL for debugging
+            full_url = str(request.url)
+            Domoticz.Log(f"/redirect_bridge received request: {full_url}")
+            
             if not state or state not in self.redirect_bridge_map:
+                Domoticz.Error(f"Redirect bridge state unknown or expired: state={state}, known_states={list(self.redirect_bridge_map.keys())}")
                 return web.Response(text="Redirect bridge state unknown or expired", status=400)
+            
             entry = self.redirect_bridge_map.pop(state)
             orig = entry.get('redirect')
+            Domoticz.Log(f"Redirect bridge found original redirect_uri: {orig}")
+            
             record = {"ts": time.time(), "state": state, "code": code, "full_code_logged": True, "error": error, "forward_target": orig}
             self.recent_auth_codes.append(record)
             if len(self.recent_auth_codes) > self.recent_codes_limit:
@@ -347,13 +399,36 @@ class DomoticzMCPServer:
                 Domoticz.Log(f"OAuth authorization code captured state={state} code={code}")
             if error:
                 Domoticz.Error(f"OAuth authorization error state={state} error={error}")
-            if not orig or not orig.startswith(('http://127.0.0.1', 'http://localhost')):
+            
+            # Validate original redirect_uri is a safe loopback address
+            if not orig:
+                Domoticz.Error("Original redirect_uri is missing")
                 return web.Response(text="Original redirect invalid", status=400)
+            
+            # Parse original redirect to validate it's a loopback
+            try:
+                parsed_orig = urllib.parse.urlparse(orig)
+                if parsed_orig.hostname not in ('127.0.0.1', 'localhost', '::1'):
+                    Domoticz.Error(f"Original redirect is not a loopback address: {orig}")
+                    return web.Response(text="Original redirect invalid - must be loopback", status=400)
+            except Exception as e:
+                Domoticz.Error(f"Failed to parse original redirect_uri: {e}")
+                return web.Response(text="Original redirect invalid", status=400)
+            
+            # Build forward URL with code or error
             sep = '&' if ('?' in orig) else '?'
-            forward = orig + sep + (f"code={urllib.parse.quote(code)}" if code else f"error={urllib.parse.quote(error or 'unknown_error')}")
+            if code:
+                forward = orig + sep + f"code={urllib.parse.quote(code)}"
+            elif error:
+                forward = orig + sep + f"error={urllib.parse.quote(error)}"
+            else:
+                forward = orig + sep + "error=unknown_error"
+            
             if state:
                 forward += f"&state={urllib.parse.quote(state)}"
-            Domoticz.Debug(f"Redirect bridge forwarding -> {forward}")
+            
+            Domoticz.Log(f"Redirect bridge forwarding to loopback: {forward}")
+            
             if self.debug_bridge_page:
                 body = (f"<html><body><h3>Authorization Complete</h3>"
                         f"<p>State: {state}</p><p>Code: {code or error}</p>"
@@ -362,15 +437,37 @@ class DomoticzMCPServer:
                         f"<script>setTimeout(function(){{window.location='{forward}';}},1500);</script>"
                         f"</body></html>")
                 return web.Response(text=body, content_type='text/html')
+            
+            # Redirect to the original loopback callback
             raise web.HTTPFound(location=forward)
         except web.HTTPException:
             raise
         except Exception as e:
             Domoticz.Error(f"/redirect_bridge error: {e}")
+            import traceback
+            Domoticz.Error(f"Traceback: {traceback.format_exc()}")
             return web.Response(text=f"Redirect bridge failure: {e}", status=500)
 
     async def last_auth_codes_handler(self, request: web_request.Request):
         return web.json_response({"recent": self.recent_auth_codes})
+
+    async def debug_redirect_bridge_state(self, request: web_request.Request):
+        """Debug endpoint to inspect redirect bridge state"""
+        return web.json_response({
+            "redirect_bridge_enabled": self.redirect_bridge_enabled,
+            "force_https_bridge": self.force_https_bridge,
+            "external_bridge_base": self.external_bridge_base,
+            "active_states": {
+                state: {
+                    "redirect_uri": info["redirect"],
+                    "age_seconds": time.time() - info["ts"]
+                }
+                for state, info in self.redirect_bridge_map.items()
+            },
+            "recent_auth_codes_count": len(self.recent_auth_codes),
+            "redirect_bridge_ttl": self.redirect_bridge_ttl,
+            "note": "This endpoint shows the current redirect bridge state and recent OAuth flows"
+        })
 
     def _purge_redirect_bridge(self):
         cutoff = time.time() - self.redirect_bridge_ttl
