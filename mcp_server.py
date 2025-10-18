@@ -144,17 +144,11 @@ class DomoticzMCPServer:
                 if self.domoticz_oauth_client:
                     self.domoticz_oauth_client.discover_oauth_endpoints()
             
-            # Build the authorization server URL using external_bridge_base if available
-            if self.external_bridge_base:
-                auth_server_url = f"{self.external_bridge_base.rstrip('/')}/.well-known/oauth-authorization-server"
-            else:
-                auth_server_url = f"http://{self.host}:{self.port}/.well-known/oauth-authorization-server"
+            # Authorization server URL points to THIS MCP server where OAuth metadata is exposed
+            auth_server_url = f"http://{self.host}:{self.port}/.well-known/oauth-authorization-server"
             
-            # Build the resource URL
-            if self.external_bridge_base:
-                resource_url = f"{self.external_bridge_base.rstrip('/')}"
-            else:
-                resource_url = f"http://{self.host if self.host != '0.0.0.0' else 'localhost'}:{self.port}"
+            # Resource URL also points to THIS MCP server
+            resource_url = f"http://{self.host if self.host != '0.0.0.0' else 'localhost'}:{self.port}"
             
             metadata = {
                 "resource": resource_url,
@@ -195,12 +189,11 @@ class DomoticzMCPServer:
                 if resp.status_code == 200:
                     metadata = resp.json()
                     
-                    # Rewrite endpoints to go through our proxy
-                    # Use external_bridge_base if available, otherwise construct from host:port
-                    if self.external_bridge_base:
-                        base_url = self.external_bridge_base.rstrip('/')
-                    else:
-                        base_url = f"http://{self.host}:{self.port}"
+                    # IMPORTANT: OAuth endpoints should point to THIS MCP server (port 8765)
+                    # where the /authorize and /token PROXY endpoints are located.
+                    # The MCP server then proxies requests to Domoticz (port 8080).
+                    # Clients connect to MCP server, not directly to Domoticz.
+                    base_url = f"http://{self.host}:{self.port}"
                     
                     # Rewrite authorization and token endpoints to use our proxy
                     if 'authorization_endpoint' in metadata:
@@ -280,11 +273,8 @@ class DomoticzMCPServer:
                 # No authorization - return 401 with WWW-Authenticate per RFC 9728
                 Domoticz.Log("SSE connection without authentication - returning 401 with OAuth discovery")
                 
-                # Build resource metadata URL using external_bridge_base if available
-                if self.external_bridge_base:
-                    resource_metadata_url = f"{self.external_bridge_base.rstrip('/')}/.well-known/oauth-protected-resource"
-                else:
-                    resource_metadata_url = f"http://{self.host}:{self.port}/.well-known/oauth-protected-resource"
+                # Resource metadata URL points to THIS MCP server
+                resource_metadata_url = f"http://{self.host}:{self.port}/.well-known/oauth-protected-resource"
                 
                 return web.Response(
                     status=401,
