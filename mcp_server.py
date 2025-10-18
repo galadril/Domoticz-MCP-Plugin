@@ -53,21 +53,29 @@ class DomoticzMCPServer:
             try:
                 # Derive host from Domoticz base (preferred) else HOSTNAME env else localhost
                 domo_host = None
+                domo_port = None
+                domo_scheme = 'https'  # default to https for force_https_bridge
                 if self.domoticz_oauth_client and getattr(self.domoticz_oauth_client, 'domoticz_base_url', None):
                     p = urllib.parse.urlparse(self.domoticz_oauth_client.domoticz_base_url)
                     domo_host = p.hostname
+                    domo_port = p.port
+                    domo_scheme = p.scheme or 'http'  # Preserve the original scheme
                 if not domo_host:
                     domo_host = os.environ.get('HOSTNAME') or 'localhost'
                 if self.force_https_bridge:
                     # We assume a reverse proxy will terminate TLS and forward /redirect_bridge to this plugin port.
-                    self.external_bridge_base = f"https://{domo_host}"
+                    # Use https scheme, but preserve port from Domoticz URL if present
+                    port_part = f":{domo_port}" if domo_port and domo_port not in (443, 80) else ''
+                    self.external_bridge_base = f"https://{domo_host}{port_part}"
                     Domoticz.Log("Redirect bridge derived HTTPS base (needs reverse proxy): " + self.external_bridge_base)
                     Domoticz.Log("Provide REDIRECT_BRIDGE_EXTERNAL_BASE env var if you need a different host.")
                 else:
-                    # Fallback: plain HTTP directly served by plugin.
-                    port_part = f":{self.port}" if self.port not in (80,) else ''
-                    self.external_bridge_base = f"http://{domo_host}{port_part}"
-                    Domoticz.Log("Redirect bridge derived HTTP base: " + self.external_bridge_base)
+                    # Fallback: Use the scheme from Domoticz URL (or http if not found)
+                    # Determine default port based on scheme
+                    default_port = 443 if domo_scheme == 'https' else 80
+                    port_part = f":{domo_port}" if domo_port and domo_port != default_port else ''
+                    self.external_bridge_base = f"{domo_scheme}://{domo_host}{port_part}"
+                    Domoticz.Log("Redirect bridge derived base: " + self.external_bridge_base)
             except Exception as e:  # pragma: no cover
                 Domoticz.Error(f"Failed to derive redirect bridge base: {e}")
         if self.force_https_bridge:
