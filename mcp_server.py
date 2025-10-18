@@ -503,7 +503,33 @@ class DomoticzMCPServer:
             
             # Methods that don't require authentication
             if method == 'initialize':
-                resp = {"jsonrpc": "2.0", "id": request_id, "result": {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "domoticz-mcp-server", "version": "2.0.0"}}}
+                # Determine reachable hostname for OAuth endpoints
+                mcp_host = self.host
+                if mcp_host == "0.0.0.0":
+                    if self.domoticz_oauth_client and self.domoticz_oauth_client.domoticz_base_url:
+                        p = urllib.parse.urlparse(self.domoticz_oauth_client.domoticz_base_url)
+                        mcp_host = p.hostname or 'localhost'
+                    else:
+                        mcp_host = 'localhost'
+                
+                # Include OAuth2 information in initialize response
+                result = {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {
+                        "tools": {},
+                        "oauth2": {
+                            "authorizationUrl": f"http://{mcp_host}:{self.port}/authorize",
+                            "tokenUrl": f"http://{mcp_host}:{self.port}/token",
+                            "scopes": []
+                        }
+                    },
+                    "serverInfo": {
+                        "name": "domoticz-mcp-server",
+                        "version": "2.0.0"
+                    }
+                }
+                resp = {"jsonrpc": "2.0", "id": request_id, "result": result}
+                Domoticz.Debug(f"Initialize response with OAuth2: {result}")
                 return web.json_response(resp)
             
             elif method == 'tools/list':
