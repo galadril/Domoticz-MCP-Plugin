@@ -4,11 +4,11 @@
         Plugin for running Domoticz MCP (Model Context Protocol) Server.
         Provides AI assistant access to Domoticz functionality through MCP protocol.
         
-        OAuth Architecture:
-        - MCP clients authenticate to THIS plugin (PKCE flow, Dynamic Client Registration)
-        - THIS plugin authenticates to Domoticz using client credentials below
-        - Plugin validates MCP client tokens, then uses its OWN tokens to call Domoticz
-        - No token passthrough (per MCP security requirements)
+        OAuth Architecture (Passthrough Mode):
+        - Users authenticate directly to Domoticz via OAuth flow
+        - MCP clients (Visual Studio, Claude Desktop, etc.) obtain OAuth tokens from Domoticz
+        - Plugin passes user tokens through to Domoticz API (no credential storage)
+        - Each user uses their own Domoticz credentials
     </description>
     <params>
         <param field="Mode1" label="Auto Start Server" width="75px">
@@ -19,8 +19,6 @@
         </param>
         <param field="Mode2" label="Health Check interval (seconds)" width="30px" required="true" default="30"/>
         <param field="Mode3" label="Domoticz URL Override" width="200px" required="false" default="" placeholder="Leave empty for http://127.0.0.1:8080"/>
-        <param field="Mode4" label="OAuth Client ID" width="200px" required="false" default="" placeholder="Client ID from Domoticz OAuth settings"/>
-        <param field="Mode5" label="OAuth Client Secret" width="200px" required="false" default="" placeholder="Client Secret from Domoticz OAuth settings" password="true"/>
         <param field="Mode6" label="Debug" width="200px">
             <options>
                 <option label="None" value="0" default="true"/>

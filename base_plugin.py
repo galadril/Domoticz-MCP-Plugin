@@ -55,22 +55,10 @@ class BasePlugin:
             Domoticz.Log(f"Domoticz URL override: {self.default_domoticz_url}" if self.default_domoticz_url else "Using default Domoticz URL: http://127.0.0.1:8080")
             domoticz_base_url = self.default_domoticz_url if self.default_domoticz_url else "http://127.0.0.1:8080"
             
-            # OAuth client credentials for plugin to authenticate to Domoticz
-            oauth_client_id = str(parameters.get("Mode4", "")).strip()
-            oauth_client_secret = str(parameters.get("Mode5", "")).strip()
+            # OAuth Passthrough Mode - no plugin credentials needed
+            Domoticz.Log("OAuth Passthrough Mode: User tokens will be passed directly to Domoticz")
             
-            if oauth_client_id and oauth_client_secret:
-                Domoticz.Log(f"OAuth client credentials configured (Client ID: {oauth_client_id[:8]}...)")
-                Domoticz.Log("Plugin will use client credentials flow to authenticate to Domoticz")
-            else:
-                Domoticz.Log("No OAuth client credentials configured - plugin will use passthrough mode")
-                Domoticz.Log("WARNING: Passthrough mode violates MCP security spec - configure client credentials in Mode4/Mode5")
-            
-            self.domoticz_oauth_client = DomoticzOAuthClient(
-                domoticz_base_url,
-                client_id=oauth_client_id if oauth_client_id else None,
-                client_secret=oauth_client_secret if oauth_client_secret else None
-            )
+            self.domoticz_oauth_client = DomoticzOAuthClient(domoticz_base_url)
             
             if self.domoticz_oauth_client.discover_oauth_endpoints():
                 Domoticz.Log("Domoticz OAuth endpoints discovered successfully")
