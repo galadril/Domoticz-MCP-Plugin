@@ -144,13 +144,20 @@ class DomoticzMCPServer:
                 if self.domoticz_oauth_client:
                     self.domoticz_oauth_client.discover_oauth_endpoints()
             
-            # Build the authorization server URL
-            auth_server_url = f"http://{self.host}:{self.port}/.well-known/oauth-authorization-server"
-            if self.external_bridge_base and self.force_https_bridge:
+            # Build the authorization server URL using external_bridge_base if available
+            if self.external_bridge_base:
                 auth_server_url = f"{self.external_bridge_base.rstrip('/')}/.well-known/oauth-authorization-server"
+            else:
+                auth_server_url = f"http://{self.host}:{self.port}/.well-known/oauth-authorization-server"
+            
+            # Build the resource URL
+            if self.external_bridge_base:
+                resource_url = f"{self.external_bridge_base.rstrip('/')}"
+            else:
+                resource_url = f"http://{self.host if self.host != '0.0.0.0' else 'localhost'}:{self.port}"
             
             metadata = {
-                "resource": f"https://{self.host if self.host != '0.0.0.0' else 'localhost'}:{self.port}",
+                "resource": resource_url,
                 "authorization_servers": [auth_server_url],
                 "bearer_methods_supported": ["header"],
                 "resource_documentation": f"http://{self.host}:{self.port}/info"
@@ -189,9 +196,11 @@ class DomoticzMCPServer:
                     metadata = resp.json()
                     
                     # Rewrite endpoints to go through our proxy
-                    base_url = f"http://{self.host}:{self.port}"
-                    if self.external_bridge_base and self.force_https_bridge:
+                    # Use external_bridge_base if available, otherwise construct from host:port
+                    if self.external_bridge_base:
                         base_url = self.external_bridge_base.rstrip('/')
+                    else:
+                        base_url = f"http://{self.host}:{self.port}"
                     
                     # Rewrite authorization and token endpoints to use our proxy
                     if 'authorization_endpoint' in metadata:
@@ -213,7 +222,7 @@ class DomoticzMCPServer:
                     if 'code_challenge_methods_supported' not in metadata:
                         metadata['code_challenge_methods_supported'] = ['S256']
                     
-                    Domoticz.Debug(f"Authorization Server Metadata proxied successfully")
+                    Domoticz.Debug(f"Authorization Server Metadata proxied successfully: auth_endpoint={metadata.get('authorization_endpoint')}")
                     return web.json_response(metadata)
                 else:
                     Domoticz.Error(f"Failed to fetch Domoticz OAuth metadata: {resp.status_code}")
@@ -270,9 +279,12 @@ class DomoticzMCPServer:
             else:
                 # No authorization - return 401 with WWW-Authenticate per RFC 9728
                 Domoticz.Log("SSE connection without authentication - returning 401 with OAuth discovery")
-                resource_metadata_url = f"http://{self.host}:{self.port}/.well-known/oauth-protected-resource"
-                if self.external_bridge_base and self.force_https_bridge:
+                
+                # Build resource metadata URL using external_bridge_base if available
+                if self.external_bridge_base:
                     resource_metadata_url = f"{self.external_bridge_base.rstrip('/')}/.well-known/oauth-protected-resource"
+                else:
+                    resource_metadata_url = f"http://{self.host}:{self.port}/.well-known/oauth-protected-resource"
                 
                 return web.Response(
                     status=401,
@@ -532,11 +544,11 @@ class DomoticzMCPServer:
 
     async def get_available_tools(self) -> List[Dict[str, Any]]:
         return [
-            {"name": "domoticz_get_version", "description": "Get Domoticz version information", "inputSchema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False}},
-            {"name": "domoticz_list_devices", "description": "List all Domoticz devices with optional filtering", "inputSchema": {"type": "object", "properties": {"filter": {"type": "string", "enum": ["all", "light", "weather", "temperature", "utility"], "default": "all"}, "used": {"type": "boolean", "default": True}}, "required": [], "additionalProperties": False}},
-            {"name": "domoticz_device_status", "description": "Get detailed status of a specific device", "inputSchema": {"type": "object", "properties": {"idx": {"type": "integer", "minimum": 1}}, "required": ["idx"], "additionalProperties": False}},
-            {"name": "domoticz_list_scenes", "description": "List all scenes and groups", "inputSchema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False}},
-            {"name": "domoticz_get_log", "description": "Retrieve Domoticz logs", "inputSchema": {"type": "object", "properties": {"log_type": {"type": "string", "enum": ["status", "error", "notification"], "default": "status"}}, "required": [], "additionalProperties": False}}
+            {"name": "domoticz_get_version", "description": "Get Domoticz version information", "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False}},
+            {"name": "domoticz_list_devices", "description": "List all Domoticz devices with optional filtering", "input_schema": {"type": "object", "properties": {"filter": {"type": "string", "enum": ["all", "light", "weather", "temperature", "utility"], "default": "all"}, "used": {"type": "boolean", "default": True}}, "required": [], "additionalProperties": False}},
+            {"name": "domoticz_device_status", "description": "Get detailed status of a specific device", "input_schema": {"type": "object", "properties": {"idx": {"type": "integer", "minimum": 1}}, "required": ["idx"], "additionalProperties": False}},
+            {"name": "domoticz_list_scenes", "description": "List all scenes and groups", "input_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False}},
+            {"name": "domoticz_get_log", "description": "Retrieve Domoticz logs", "input_schema": {"type": "object", "properties": {"log_type": {"type": "string", "enum": ["status", "error", "notification"], "default": "status"}}, "required": [], "additionalProperties": False}}
         ]
 
     async def execute_domoticz_tool(self, name: str, arguments: Dict[str, Any], access_token: str) -> Dict[str, Any]:
